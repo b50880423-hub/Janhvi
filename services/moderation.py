@@ -1,62 +1,53 @@
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from telegram import ChatPermissions
-from database.mongo import add_violation, log_event
+from telegram.error import TelegramError
+from database.mongo import add_violation, add_event
 
-def mute_duration_for_violation(count: int) -> int:
-    # minutes: 1st=30m, 2nd=1h, 3rd=2h, 4th=6h, 5th and every later violation=24h
-    if count <= 1:
-        return 30
-    if count == 2:
-        return 60
-    if count == 3:
-        return 120
+def mute_minutes(count):
+    if count < 4:
+        return 0
     if count == 4:
+        return 20
+    if count == 5:
+        return 60
+    if count == 6:
+        return 120
+    if count == 7:
         return 360
-    return 1440  # 24 hours for 5th, 6th, 7th... forever
+    return 1440
 
 async def delete_message(message):
     try:
         await message.delete()
         return True
-    except Exception:
+    except TelegramError:
         return False
 
 async def mute_user(message, minutes):
     try:
-        until = datetime.now(timezone.utc).timestamp() + minutes * 60
+        until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
         await message.chat.restrict_member(
             user_id=message.from_user.id,
-            permissions=ChatPermissions(
-                can_send_messages=False,
-                can_send_audios=False,
-                can_send_documents=False,
-                can_send_photos=False,
-                can_send_videos=False,
-                can_send_video_notes=False,
-                can_send_voice_notes=False,
-                can_send_polls=False,
-                can_send_other_messages=False,
-                can_add_web_page_previews=False,
-                can_change_info=False,
-                can_invite_users=False,
-                can_pin_messages=False,
-                can_manage_topics=False,
-            ),
-            until_date=int(until),
+            permissions=ChatPermissions(can_send_messages=False),
+            until_date=until,
         )
-        return True
-    except Exception:
-        return False
+        return True, ""
+    except TelegramError as e:
+        return False, str(e)
 
 async def punish(message, reason, settings):
-    # Automatic moderation is DELETE + MUTE only. Never automatically ban.
-    count = await add_violation(message.chat.id, message.from_user.id, reason)
+    count = add_violation(message.chat.id, message.from_user.id, reason,
+                          message.from_user.username)
     deleted = await delete_message(message)
-    minutes = mute_duration_for_violation(count)
-    muted = await mute_user(message, minutes)
+    minutes = mute_minutes(count)
+    muted, mute_error = (False, "")
+    if minutes:
+        muted, mute_error = await mute_user(message, minutes)
 
-    action = f"delete + mute {minutes}m"
-    await log_event({
+    action = "delete + warning" if minutes == 0 else (
+        f"delete + mute {minutes}m" if muted else f"delete + mute failed ({minutes}m)"
+    )
+    add_event({
         "created_at": datetime.now(timezone.utc),
         "chat_id": message.chat.id,
         "user_id": message.from_user.id,
@@ -66,6 +57,7 @@ async def punish(message, reason, settings):
         "deleted": deleted,
         "muted": muted,
         "mute_minutes": minutes,
+        "mute_error": mute_error,
         "action": action,
     })
-    return count, action, deleted, muted
+    return count, minutes, deleted, muted, mute_error
