@@ -5,6 +5,10 @@ from services.detection import detect
 from services.moderation import punish
 from services.media_safety import explicit_text, explicit_link, classify_media
 
+import logging
+
+logger = logging.getLogger("security-bot")
+
 async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not message or not message.from_user or not update.effective_chat:
@@ -23,8 +27,8 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         member = await update.effective_chat.get_member(message.from_user.id)
         if member.status in ("administrator", "creator"):
             return
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception("Failed to send moderation warning: %s", e)
 
     # Explicit-content protection has priority.
     caption = message.caption or message.text or ""
@@ -70,8 +74,8 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Action: 🗑️ deleted + {status}",
                 parse_mode="HTML", disable_notification=True
             )
-        except Exception:
-            pass
+        except Exception as e:
+        logger.exception("Failed to send moderation warning: %s", e)
         return
 
     reasons = detect(message, settings, get_filters(update.effective_chat.id))
@@ -90,8 +94,8 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Next violations may result in a mute.",
                 parse_mode="HTML", disable_notification=True)
             context.job_queue.run_once(delete_later, 15, data=warning)
-        except Exception:
-            pass
+        except Exception as e:
+        logger.exception("Failed to send moderation warning: %s", e)
     else:
         try:
             status = f"🔇 muted for {minutes} minutes" if muted else f"⚠️ mute failed: {mute_error}"
@@ -102,14 +106,14 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Violation: <b>{count}</b>\n"
                 f"Action: 🗑️ deleted + {status}",
                 parse_mode="HTML", disable_notification=True)
-        except Exception:
-            pass
+        except Exception as e:
+        logger.exception("Failed to send moderation warning: %s", e)
 
 async def delete_later(context):
     try:
         await context.job.data.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.exception("Failed to send moderation warning: %s", e)
 
 async def is_exempt(update, user_id):
     return is_whitelisted(update.effective_chat.id, user_id)
