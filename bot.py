@@ -1,51 +1,70 @@
 import logging
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, filters
-from config import BOT_TOKEN
-from database.mongo import connect_db
-from handlers.start import start
-from handlers.admin import (
-    settings, help_cmd, warn, mute, unmute, ban, unban, whitelist, unwhitelist,
-    userinfo, warnings, resetwarnings
+from telegram import Update
+from telegram.ext import (
+    Application, CommandHandler, MessageHandler, ContextTypes, filters
 )
-from handlers.callbacks import settings_callback
-from handlers.moderation import moderate_message
+from config import BOT_TOKEN, MONGO_URI
+from database.mongo import init_db
 from web.health_server import start_health_server
-from handlers.admin import my_chat_member
+from handlers.moderation import moderate_message
+from handlers.admin import (
+    settings_cmd, antispam_cmd, lock_cmd, unlock_cmd, filter_cmd,
+    warn_cmd, warnings_cmd, resetwarnings_cmd, mute_cmd, unmute_cmd,
+    whitelist_cmd, unwhitelist_cmd, userinfo_cmd, stats_cmd, logs_cmd,
+    status_cmd, help_cmd
+)
 
 logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger("security-bot")
 
-async def post_init(app):
-    await connect_db()
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log.error("Unhandled Telegram error: %s", context.error)
 
 def main():
-    start_health_server()
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is missing")
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    if not MONGO_URI:
+        raise RuntimeError("MONGO_URI is missing")
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CommandHandler("settings", settings))
-    app.add_handler(CommandHandler("warn", warn))
-    app.add_handler(CommandHandler("mute", mute))
-    app.add_handler(CommandHandler("unmute", unmute))
-    app.add_handler(CommandHandler("ban", ban))
-    app.add_handler(CommandHandler("unban", unban))
-    app.add_handler(CommandHandler("whitelist", whitelist))
-    app.add_handler(CommandHandler("unwhitelist", unwhitelist))
-    app.add_handler(CommandHandler("userinfo", userinfo))
-    app.add_handler(CommandHandler("warnings", warnings))
-    app.add_handler(CommandHandler("resetwarnings", resetwarnings))
-    app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^as:"))
-    app.add_handler(ChatMemberHandler(my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.ALL, moderate_message), group=10)
+    start_health_server()
+    init_db()
 
-    logger.info("AntiSpam bot started")
-    app.run_polling(allowed_updates=["message", "edited_message", "callback_query", "my_chat_member"])
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    commands = {
+        "settings": settings_cmd,
+        "antispam": antispam_cmd,
+        "lock": lock_cmd,
+        "unlock": unlock_cmd,
+        "filter": filter_cmd,
+        "warn": warn_cmd,
+        "warnings": warnings_cmd,
+        "resetwarnings": resetwarnings_cmd,
+        "mute": mute_cmd,
+        "unmute": unmute_cmd,
+        "whitelist": whitelist_cmd,
+        "unwhitelist": unwhitelist_cmd,
+        "userinfo": userinfo_cmd,
+        "stats": stats_cmd,
+        "logs": logs_cmd,
+        "status": status_cmd,
+        "help": help_cmd,
+        "start": help_cmd,
+    }
+    for name, fn in commands.items():
+        app.add_handler(CommandHandler(name, fn))
+
+    app.add_handler(MessageHandler(
+        filters.ALL & ~filters.COMMAND & filters.ChatType.GROUPS,
+        moderate_message
+    ))
+    app.add_error_handler(error_handler)
+
+    log.info("Ultra Telegram Security Bot started")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()

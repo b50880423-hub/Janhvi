@@ -1,5 +1,5 @@
-python-telegram-bot[job-queue]==22.5
-motor==3.7.1
-pymongo==4.14.1
-dnspython==2.7.0
-python-dotenv==1.1.1
+python-telegram-bot[job-queue]>=22.0,<23
+pymongo>=4.10
+dnspython>=2.6
+python-dotenv>=1.0
+requests>=2.32
