@@ -1,0 +1,5 @@
+Warning fix applied:
+- handlers/moderation.py no longer silently ignores warning-send exceptions.
+- Warning-send failures are logged with the security-bot logger.
+- Existing warning thresholds and moderation behavior were preserved.
+- Ensure the bot is an administrator with permission to send messages and restrict members.
