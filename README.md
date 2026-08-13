@@ -1,64 +1,91 @@
-# Ultra Telegram Group Security Bot
+# Advanced Telegram AntiSpam Bot
 
-Advanced Python Telegram group security bot with MongoDB persistence, group-specific filters, automatic moderation, warnings, escalating mutes, logs, statistics, whitelist, inline-ready settings foundation, and Render health endpoint.
+A MongoDB-backed Telegram group moderation bot for automatic spam protection.
 
-## Automatic punishment
-- 1st violation: Delete + warning
-- 2nd: Delete + warning
-- 3rd: Delete + warning
-- 4th: Delete + 20 minute mute
-- 5th: Delete + 1 hour mute
-- 6th: Delete + 2 hour mute
-- 7th: Delete + 6 hour mute
-- 8th+: Delete + 24 hour mute
-- Never automatically bans.
+## Features
+- Anti-link
+- Anti-sticker/photo/video/GIF/document spam
+- Anti-forward
+- Flood/rate-limit detection
+- Duplicate-message detection
+- Mention spam
+- Automatic delete + escalating temporary mute
+- No automatic permanent bans
+- Whitelist
+- Inline settings panel
+- Logger group
+- Per-group MongoDB settings
 
-## Commands
+## Deploy on Render
+Create a **Background Worker**:
+- Build command: `pip install -r requirements.txt`
+- Start command: `python bot.py`
 
-### Admin
-`/settings`
-`/antispam on`
-`/antispam off`
-`/lock TYPE`
-`/unlock TYPE`
-`/filter add WORD`
-`/filter remove WORD`
-`/filter list`
-`/filter clear`
-`/filter on`
-`/filter off`
-`/warn` (reply)
-`/warnings` (reply)
-`/resetwarnings` (reply)
-`/mute [minutes]` (reply)
-`/unmute` (reply)
-`/whitelist` (reply)
-`/unwhitelist` (reply)
-`/userinfo` (reply)
-`/stats`
-`/logs`
-`/status`
-`/help`
+Environment variables:
+- `BOT_TOKEN`
+- `MONGO_URI`
+- `MONGO_DB` (optional)
+- `LOGGER_CHAT_ID` (optional)
 
-Lock types:
-`links stickers photos videos gifs documents forwards mentions flood duplicate badwords all`
-
-## Per-group filters
-Each group has its own MongoDB filter collection. A word added in Group A does not affect Group B.
-
-## Render
-Web Service:
-- Build: `pip install -r requirements.txt`
-- Start: `python bot.py`
-- Health path: `/health`
-- Instances: `1`
-
-External pinger URL:
-`https://YOUR-SERVICE.onrender.com/health`
-
-## Telegram permissions
-Make the bot an administrator with:
+Add the bot to your Telegram group as an administrator with:
 - Delete messages
 - Restrict members
+- Ban users (recommended)
+- Read messages / normal group permissions
 
-Do not run two polling instances with the same bot token; Telegram returns 409 Conflict.
+Then use `/settings` in the group.
+
+## Important
+The bot cannot reliably moderate content it is not allowed to receive. In groups where Telegram privacy mode is enabled, disable privacy mode for the bot via BotFather so it can inspect normal group messages.
+
+Do not give the bot more permissions than needed.
+
+## Automatic punishment
+The anti-spam engine only performs:
+1. Delete the offending message.
+2. Temporarily mute the user.
+
+Escalation:
+- 1st violation: 30 minutes
+- 2nd: 1 hour
+- 3rd: 2 hours
+- 4th: 6 hours
+- 5th and every later violation: 24 hours
+
+The bot never automatically permanently bans users.
+
+
+## Render Web Service + Pinger
+This version exposes a health endpoint for uptime monitors.
+
+Render:
+- Service type: Web Service
+- Build command: `pip install -r requirements.txt`
+- Start command: `python bot.py`
+- Instances: 1
+
+Health endpoints: `/`, `/health`, `/healthz`.
+Use `https://YOUR-SERVICE.onrender.com/health` in your HTTP uptime monitor.
+
+Only one process may poll the same Telegram bot token.
+
+## Advanced command system
+
+- `/help` — full command list
+- `/settings` — inline admin settings
+- `/warn` — add a warning to a replied user
+- `/warnings` — view warnings
+- `/resetwarnings` — reset warnings
+- `/mute [minutes]` — manually mute a replied user
+- `/unmute` — manually unmute a replied user
+- `/whitelist` / `/unwhitelist` — bypass or restore anti-spam checks
+- `/blacklist` / `/unblacklist` — future messages are automatically deleted + muted
+- `/userinfo [USER_ID]` — moderation information
+- `/lock TYPE` / `/unlock TYPE` — enable/disable protection types
+- `/filter add WORD` / `/filter remove WORD` / `/filter list` — custom filters
+- `/antispam on|off` — master protection switch
+- `/logs` — recent MongoDB moderation logs
+
+Lock types: `links`, `stickers`, `photos`, `videos`, `gifs`, `documents`, `forwards`, `mentions`, `flood`, `duplicate`, `badwords`, `all`.
+
+Automatic moderation remains **delete + temporary mute only**: 30m, 1h, 2h, 6h, then 24h for the 5th and every later violation. No automatic permanent bans.
