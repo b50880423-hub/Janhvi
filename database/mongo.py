@@ -9,7 +9,7 @@ def _now():
     return datetime.now(timezone.utc)
 
 def init_db():
-    if _db is None:
+    if not _db:
         return
     _db.groups.create_index([("chat_id", ASCENDING)], unique=True)
     _db.filters.create_index([("chat_id", ASCENDING), ("term", ASCENDING)], unique=True)
@@ -27,7 +27,7 @@ def mongo_ok():
         return False
 
 def get_settings(chat_id):
-    if _db is None:
+    if not _db:
         return dict(DEFAULT_SETTINGS)
     doc = _db.groups.find_one({"chat_id": chat_id}) or {}
     settings = dict(DEFAULT_SETTINGS)
@@ -38,19 +38,19 @@ def get_settings(chat_id):
     return settings
 
 def set_setting(chat_id, key, value):
-    if _db is None:
+    if not _db:
         return
     _db.groups.update_one({"chat_id": chat_id},
                           {"$set": {f"settings.{key}": value, "updated_at": _now()}},
                           upsert=True)
 
 def get_filters(chat_id):
-    if _db is None:
+    if not _db:
         return []
     return [x["term"] for x in _db.filters.find({"chat_id": chat_id}, {"term": 1}).sort("term", ASCENDING)]
 
 def add_filter(chat_id, term):
-    if _db is None:
+    if not _db:
         return False
     term = term.strip().lower()
     if not term:
@@ -62,21 +62,21 @@ def add_filter(chat_id, term):
         return False
 
 def remove_filter(chat_id, term):
-    if _db is None:
+    if not _db:
         return False
     return _db.filters.delete_one({"chat_id": chat_id, "term": term.strip().lower()}).deleted_count > 0
 
 def clear_filters(chat_id):
-    if _db is not None:
+    if _db:
         _db.filters.delete_many({"chat_id": chat_id})
 
 def is_whitelisted(chat_id, user_id):
-    if _db is None:
+    if not _db:
         return False
     return _db.whitelist.find_one({"chat_id": chat_id, "user_id": user_id}) is not None
 
 def set_whitelist(chat_id, user_id, enabled=True):
-    if _db is None:
+    if not _db:
         return
     if enabled:
         _db.whitelist.update_one({"chat_id": chat_id, "user_id": user_id},
@@ -86,13 +86,13 @@ def set_whitelist(chat_id, user_id, enabled=True):
         _db.whitelist.delete_one({"chat_id": chat_id, "user_id": user_id})
 
 def get_violation_count(chat_id, user_id):
-    if _db is None:
+    if not _db:
         return 0
     doc = _db.violations.find_one({"chat_id": chat_id, "user_id": user_id})
     return int(doc.get("count", 0)) if doc else 0
 
 def add_violation(chat_id, user_id, reason, username=None):
-    if _db is None:
+    if not _db:
         return 1
     doc = _db.violations.find_one_and_update(
         {"chat_id": chat_id, "user_id": user_id},
@@ -102,21 +102,21 @@ def add_violation(chat_id, user_id, reason, username=None):
     return int(doc.get("count", 1))
 
 def reset_violations(chat_id, user_id):
-    if _db is not None:
+    if _db:
         _db.violations.update_one({"chat_id": chat_id, "user_id": user_id},
                                   {"$set": {"count": 0, "reasons": {}, "last_at": _now()}})
 
 def add_event(data):
-    if _db is not None:
+    if _db:
         _db.events.insert_one(data)
 
 def recent_events(chat_id, limit=10):
-    if _db is None:
+    if not _db:
         return []
     return list(_db.events.find({"chat_id": chat_id}).sort("created_at", DESCENDING).limit(limit))
 
 def stats(chat_id):
-    if _db is None:
+    if not _db:
         return {}
     events = _db.events.count_documents({"chat_id": chat_id})
     deleted = _db.events.count_documents({"chat_id": chat_id, "deleted": True})
