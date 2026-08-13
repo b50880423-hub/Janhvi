@@ -57,16 +57,6 @@ async def moderate_message(update, context):
         reason = "duplicate message spam"
 
     if reason:
-        count, action = await punish(message, reason, s)
-        try:
-            await message.chat.send_message(
-                f"🛡️ <b>AntiSpam</b>\n"
-                f"User: {message.from_user.mention_html()}\n"
-                f"Reason: <b>{reason}</b>\n"
-                f"Violations: <b>{count}</b>\n"
-                f"Action: <b>{action}</b>",
-                parse_mode="HTML",
-                disable_notification=True
-            )
-        except Exception:
-            pass
+        count, action, deleted, muted = await punish(message, reason, s)
+        # Moderation is intentionally silent in the group after deletion.
+        # Details are recorded in MongoDB for logger/dashboard use.
