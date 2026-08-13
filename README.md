@@ -9,9 +9,8 @@ A MongoDB-backed Telegram group moderation bot for automatic spam protection.
 - Flood/rate-limit detection
 - Duplicate-message detection
 - Mention spam
-- Configurable warning escalation
-- Temporary mute
-- Ban after repeated violations
+- Automatic delete + escalating temporary mute
+- No automatic permanent bans
 - Whitelist
 - Inline settings panel
 - Logger group
@@ -40,3 +39,17 @@ Then use `/settings` in the group.
 The bot cannot reliably moderate content it is not allowed to receive. In groups where Telegram privacy mode is enabled, disable privacy mode for the bot via BotFather so it can inspect normal group messages.
 
 Do not give the bot more permissions than needed.
+
+## Automatic punishment
+The anti-spam engine only performs:
+1. Delete the offending message.
+2. Temporarily mute the user.
+
+Escalation:
+- 1st violation: 30 minutes
+- 2nd: 1 hour
+- 3rd: 2 hours
+- 4th: 6 hours
+- 5th and every later violation: 24 hours
+
+The bot never automatically permanently bans users.

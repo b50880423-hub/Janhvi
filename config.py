@@ -22,7 +22,5 @@ DEFAULT_SETTINGS = {
     "window_seconds": 8,
     "max_duplicate": 3,
     "max_mentions": 6,
-    "warning_limit": 3,
     "mute_minutes": 30,
-    "ban_after_warnings": 6,
 }
