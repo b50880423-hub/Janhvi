@@ -1,0 +1,4 @@
+BOT_TOKEN=YOUR_TELEGRAM_BOT_TOKEN
+MONGO_URI=mongodb+srv://USERNAME:PASSWORD@CLUSTER.mongodb.net/?retryWrites=true&w=majority
+MONGO_DB=antispam_bot
+LOGGER_CHAT_ID=0
