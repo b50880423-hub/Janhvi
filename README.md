@@ -53,3 +53,18 @@ Escalation:
 - 5th and every later violation: 24 hours
 
 The bot never automatically permanently bans users.
+
+
+## Render Web Service + Pinger
+This version exposes a health endpoint for uptime monitors.
+
+Render:
+- Service type: Web Service
+- Build command: `pip install -r requirements.txt`
+- Start command: `python bot.py`
+- Instances: 1
+
+Health endpoints: `/`, `/health`, `/healthz`.
+Use `https://YOUR-SERVICE.onrender.com/health` in your HTTP uptime monitor.
+
+Only one process may poll the same Telegram bot token.

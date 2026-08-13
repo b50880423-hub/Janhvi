@@ -9,6 +9,7 @@ from handlers.admin import (
 )
 from handlers.callbacks import settings_callback
 from handlers.moderation import moderate_message
+from web.health_server import start_health_server
 from handlers.admin import my_chat_member
 
 logging.basicConfig(
@@ -21,6 +22,7 @@ async def post_init(app):
     await connect_db()
 
 def main():
+    start_health_server()
     if not BOT_TOKEN:
         raise RuntimeError("BOT_TOKEN is missing")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
