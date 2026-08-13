@@ -26,9 +26,3 @@ DEFAULT_SETTINGS = {
     "flood_window": 8,
     "duplicate_limit": 3,
 }
-
-SIGHTENGINE_API_USER = os.getenv("SIGHTENGINE_API_USER", "").strip()
-SIGHTENGINE_API_SECRET = os.getenv("SIGHTENGINE_API_SECRET", "").strip()
-SIGHTENGINE_MODEL = os.getenv("SIGHTENGINE_MODEL", "nudity-2.1").strip()
-# First occurrence of positively identified explicit adult content => 24h mute.
-EXPLICIT_MUTE_MINUTES = int(os.getenv("EXPLICIT_MUTE_MINUTES", "1440"))
