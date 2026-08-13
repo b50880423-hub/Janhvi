@@ -1,62 +1,115 @@
-from datetime import datetime
-from telegram.constants import ChatType
-from database.mongo import get_group, get_user
-from config import DEFAULT_SETTINGS
-from services.spam_detector import detector, has_link, has_badword, mention_count
+from telegram import Update
+from telegram.ext import ContextTypes
+from database.mongo import get_settings, get_filters, is_whitelisted
+from services.detection import detect
 from services.moderation import punish
-from utils.permissions import is_admin
+from services.media_safety import explicit_text, explicit_link, classify_media
 
-async def moderate_message(update, context):
+async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
-    if not message or not message.chat or message.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
+    if not message or not message.from_user or not update.effective_chat:
         return
-    if not message.from_user or message.from_user.is_bot:
-        return
-
-    if await is_admin(context.bot, message.chat.id, message.from_user.id):
+    if update.effective_chat.type not in ("group", "supergroup"):
         return
 
-    user = await get_user(message.chat.id, message.from_user.id)
-    if user and user.get("whitelisted"):
+    settings = get_settings(update.effective_chat.id)
+    if not settings.get("enabled"):
+        return
+    if await is_exempt(update, message.from_user.id):
         return
 
-    s = await get_group(message.chat.id, DEFAULT_SETTINGS)
-    if not s.get("enabled", True):
+    # Never moderate group admins/owners.
+    try:
+        member = await update.effective_chat.get_member(message.from_user.id)
+        if member.status in ("administrator", "creator"):
+            return
+    except Exception:
+        pass
+
+    # Explicit-content protection has priority.
+    caption = message.caption or message.text or ""
+    explicit_reason = explicit_text(caption) or explicit_link(caption)
+
+    if not explicit_reason:
+        explicit_reason = await classify_media(message, context)
+
+    if explicit_reason:
+        # Explicit content is an immediate first-occurrence action:
+        # delete + 24h mute. Do not wait for the normal 4th violation.
+        from database.mongo import add_violation, add_event
+        from services.moderation import delete_message, mute_user
+        from datetime import datetime, timezone
+
+        count = add_violation(
+            message.chat.id, message.from_user.id,
+            explicit_reason, message.from_user.username
+        )
+        deleted = await delete_message(message)
+        muted, mute_error = await mute_user(
+            message, int(__import__("config").EXPLICIT_MUTE_MINUTES)
+        )
+        add_event({
+            "created_at": datetime.now(timezone.utc),
+            "chat_id": message.chat.id,
+            "user_id": message.from_user.id,
+            "username": message.from_user.username,
+            "reason": explicit_reason,
+            "violations": count,
+            "deleted": deleted,
+            "muted": muted,
+            "mute_minutes": int(__import__("config").EXPLICIT_MUTE_MINUTES),
+            "mute_error": mute_error,
+            "action": "explicit delete + 24h mute" if muted else "explicit delete + mute failed",
+        })
+        try:
+            status = "🔇 24 hour mute" if muted else "⚠️ mute failed"
+            await message.chat.send_message(
+                f"🚨 <b>Explicit content removed</b>\\n"
+                f"User: {message.from_user.mention_html()}\\n"
+                f"Reason: <b>{explicit_reason}</b>\\n"
+                f"Action: 🗑️ deleted + {status}",
+                parse_mode="HTML", disable_notification=True
+            )
+        except Exception:
+            pass
         return
 
-    reason = None
-    text = message.text or message.caption or ""
-    now = datetime.utcnow().timestamp()
+    reasons = detect(message, settings, get_filters(update.effective_chat.id))
+    if not reasons:
+        return
 
-    if s.get("antilink") and has_link(message):
-        reason = "link spam"
-    elif s.get("antisticker") and message.sticker:
-        reason = "sticker spam"
-    elif s.get("antiphoto") and message.photo:
-        reason = "photo spam"
-    elif s.get("antivideo") and message.video:
-        reason = "video spam"
-    elif s.get("antigif") and message.animation:
-        reason = "GIF spam"
-    elif s.get("antidocument") and message.document:
-        reason = "document spam"
-    elif s.get("antiforward") and (message.forward_origin or getattr(message, "is_automatic_forward", False)):
-        reason = "forward spam"
-    elif s.get("antimention") and mention_count(message) > int(s.get("max_mentions", 6)):
-        reason = "mention spam"
-    elif s.get("badwords") and has_badword(message):
-        reason = "prohibited content"
-    elif s.get("antiflood") and detector.check_flood(
-        message.chat.id, message.from_user.id, now,
-        int(s.get("max_messages", 6)), int(s.get("window_seconds", 8))
-    ):
-        reason = "message flood"
-    elif s.get("antiduplicate") and detector.check_duplicate(
-        message.chat.id, message.from_user.id, text, now, int(s.get("max_duplicate", 3))
-    ):
-        reason = "duplicate message spam"
+    reason = reasons[0]
+    count, minutes, deleted, muted, mute_error = await punish(message, reason, settings)
 
-    if reason:
-        count, action, deleted, muted = await punish(message, reason, s)
-        # Moderation is intentionally silent in the group after deletion.
-        # Details are recorded in MongoDB for logger/dashboard use.
+    if count <= 3:
+        try:
+            warning = await message.chat.send_message(
+                f"⚠️ <b>Warning {count}/3</b>\n"
+                f"User: {message.from_user.mention_html()}\n"
+                f"Reason: <b>{reason}</b>\n"
+                f"Next violations may result in a mute.",
+                parse_mode="HTML", disable_notification=True)
+            context.job_queue.run_once(delete_later, 15, data=warning)
+        except Exception:
+            pass
+    else:
+        try:
+            status = f"🔇 muted for {minutes} minutes" if muted else f"⚠️ mute failed: {mute_error}"
+            await message.chat.send_message(
+                f"🛡️ <b>Automatic moderation</b>\n"
+                f"User: {message.from_user.mention_html()}\n"
+                f"Reason: <b>{reason}</b>\n"
+                f"Violation: <b>{count}</b>\n"
+                f"Action: 🗑️ deleted + {status}",
+                parse_mode="HTML", disable_notification=True)
+        except Exception:
+            pass
+
+async def delete_later(context):
+    try:
+        await context.job.data.delete()
+    except Exception:
+        pass
+
+async def is_exempt(update, user_id):
+    return is_whitelisted(update.effective_chat.id, user_id)
