@@ -75,7 +75,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML", disable_notification=True
             )
         except Exception as e:
-        logger.exception("Failed to send moderation warning: %s", e)
+            logger.exception("Failed to send moderation warning: %s", e)
         return
 
     reasons = detect(message, settings, get_filters(update.effective_chat.id))
@@ -95,7 +95,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="HTML", disable_notification=True)
             context.job_queue.run_once(delete_later, 15, data=warning)
         except Exception as e:
-        logger.exception("Failed to send moderation warning: %s", e)
+            logger.exception("Failed to send moderation warning: %s", e)
     else:
         try:
             status = f"🔇 muted for {minutes} minutes" if muted else f"⚠️ mute failed: {mute_error}"
@@ -107,7 +107,7 @@ async def moderate_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Action: 🗑️ deleted + {status}",
                 parse_mode="HTML", disable_notification=True)
         except Exception as e:
-        logger.exception("Failed to send moderation warning: %s", e)
+            logger.exception("Failed to send moderation warning: %s", e)
 
 async def delete_later(context):
     try:
