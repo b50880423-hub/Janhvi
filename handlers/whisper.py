@@ -146,9 +146,7 @@ async def whisper_inline_query(update, context):
 
     query = (iq.query or "").strip()
     if not query:
-        await iq.answer([], cache_time=0, is_personal=True,
-                        switch_pm_text="Type @username message",
-                        switch_pm_parameter="whisper_help")
+        await iq.answer([], cache_time=0, is_personal=True)
         return
 
     parts = query.split(maxsplit=1)
