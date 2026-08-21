@@ -10,14 +10,6 @@ from utils.whisper_crypto import encrypt_text, decrypt_text
 def _now():
     return datetime.now(timezone.utc)
 
-def _as_utc(value):
-    """Normalize MongoDB/Python datetimes to timezone-aware UTC."""
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
-
 def _wid():
     return secrets.token_hex(4).upper()
 
@@ -213,83 +205,64 @@ async def whisper_inline_query(update, context):
     )
     await iq.answer([result], cache_time=0, is_personal=True)
 
+def _as_utc(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
 async def whisper_callback(update, context):
     q = update.callback_query
-    if not q.message or not q.message.chat:
+    if not q or not q.data or not q.from_user:
         return
     parts = q.data.split(":")
-    if len(parts) < 3: return
+    if len(parts) < 3 or parts[0] != "ws":
+        return
     wid = parts[2]
     uid = q.from_user.id
 
-    # Inline whispers are finalized only after they are inserted into a group.
+    # IMPORTANT: inline messages do not have q.message. Handle them BEFORE
+    # checking q.message, otherwise Telegram keeps the button spinning.
     if parts[1] == "inline":
         pending = await mongo.whispers.find_one({"whisper_id": wid, "status": "pending_inline"})
         if not pending:
             await q.answer("Invalid or expired whisper! Please create another one.", show_alert=True)
             return
-        if _as_utc(pending.get("expires_at")) and _as_utc(pending.get("expires_at")) < _now():
+
+        expires_at = _as_utc(pending.get("expires_at"))
+        if expires_at and expires_at < _now():
             await mongo.whispers.delete_one({"whisper_id": wid})
             await q.answer("Whisper expired! Please create another one.", show_alert=True)
             return
-        if uid != pending["sender_id"]:
-            from database.mongo import users
-            username = pending.get("recipient_username")
-            target_doc = await users.find_one({
-                "username": {"$regex": f"^{__import__('re').escape(username)}$", "$options": "i"}
-            })
-            if not target_doc or int(target_doc.get("user_id", 0)) != uid:
-                await q.answer("🔒 This whisper is not for you.", show_alert=True)
-                return
-        else:
-            target_doc = None
 
+        # Find the intended recipient by username. This is independent of the
+        # inline message's chat because callback queries for inline messages
+        # contain inline_message_id instead of message/chat.
         from database.mongo import users
-        if target_doc is None:
-            username = pending.get("recipient_username")
-            target_doc = await users.find_one({
-                "username": {"$regex": f"^{__import__('re').escape(username)}$", "$options": "i"}
-            })
-        if not target_doc:
-            await q.answer("I haven't seen that username yet. Ask the user to interact with the bot first.", show_alert=True)
-            return
+        import re
+        username = pending.get("recipient_username") or ""
+        target_doc = await users.find_one({
+            "username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}
+        })
+        recipient_id = int(target_doc.get("user_id")) if target_doc and target_doc.get("user_id") else None
 
-        recipient_id = int(target_doc["user_id"])
-        if uid not in (pending["sender_id"], recipient_id):
+        if uid != int(pending.get("sender_id", 0)) and uid != recipient_id:
             await q.answer("🔒 This whisper is not for you.", show_alert=True)
             return
 
-        final_doc = {
-            "whisper_id": wid, "conversation_id": _cid(),
-            "chat_id": q.message.chat.id,
-            "sender_id": pending["sender_id"], "recipient_id": recipient_id,
-            "sender_username": pending.get("sender_username"),
-            "recipient_username": pending.get("recipient_username"),
-            "sender_name": pending.get("sender_name"),
-            "recipient_name": target_doc.get("first_name") or pending.get("recipient_username"),
-            "anonymous": False,
-            "messages": [{"message_id": 1, "sender_id": pending["sender_id"],
-                          "text": pending["text"], "created_at": _now(), "edited": False}],
-            "created_at": pending["created_at"], "updated_at": _now(),
-            "status": "active", "public_message_id": q.message.message_id,
-        }
-        await mongo.whispers.replace_one({"whisper_id": wid}, final_doc, upsert=True)
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
-                                    [InlineKeyboardButton("💬 Reply", callback_data=f"ws:reply:{wid}"),
-                                     InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")]])
-        try:
-            await q.edit_message_text(
-                f"🔐 <b>A whisper message to @{html.escape(pending.get('recipient_username') or 'user')}</b>\n"
-                "Only they can open this whisper.",
-                parse_mode="HTML", reply_markup=kb
-            )
-        except Exception:
-            pass
-        messages = [decrypt_text(m["text"]) for m in final_doc.get("messages", [])]
-        secret_text = "\n\n──────────\n\n".join(messages).strip() or "This whisper is empty."
+        # Inline whisper content is already encrypted in MongoDB. Reveal it
+        # directly in Telegram's native callback alert; never open bot DM.
+        secret_text = decrypt_text(pending.get("text", "")) or "This whisper is empty."
         if len(secret_text) > 195:
             secret_text = secret_text[:192] + "…"
         await q.answer(secret_text, show_alert=True)
+        return
+
+    # Normal /whisper cards are regular group messages and therefore must have
+    # a message/chat attached.
+    if not q.message or not q.message.chat:
+        await q.answer("This whisper button is no longer available.", show_alert=True)
         return
 
     doc = await mongo.whispers.find_one({"whisper_id": wid})
