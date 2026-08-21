@@ -1,5 +1,5 @@
 import logging
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ChatMemberHandler, InlineQueryHandler, filters
 from config import BOT_TOKEN
 from database.mongo import connect_db
 from handlers.start import start
@@ -11,12 +11,22 @@ from handlers.callbacks import settings_callback
 from handlers.moderation import moderate_message
 from handlers.whisper import (
     whisper_command, whisper_callback, whisper_message_handler,
+    whisper_inline_query, open_whisper_start,
     owner_whisper_panel, owner_whisper_callback,
 )
 from web.health_server import start_health_server
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+async def start_command(update, context):
+    args = getattr(context, "args", []) or []
+    if args and args[0].startswith("ws_"):
+        handled = await open_whisper_start(update, context, args[0][3:])
+        if handled:
+            return
+    await start(update, context)
+
 
 async def post_init(app):
     await connect_db()
@@ -26,7 +36,7 @@ def main():
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is missing")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     commands = {
-        "start": start, "help": help_cmd, "settings": settings,
+        "start": start_command, "help": help_cmd, "settings": settings,
         "warn": warn, "mute": mute, "unmute": unmute,
         "whitelist": whitelist, "unwhitelist": unwhitelist,
         "blacklist": blacklist, "unblacklist": unblacklist,
@@ -36,6 +46,8 @@ def main():
         "whisper": whisper_command, "whisperowner": owner_whisper_panel,
     }
     for name, handler in commands.items(): app.add_handler(CommandHandler(name, handler))
+    # User-account whisper: @BotUsername @target secret message
+    app.add_handler(InlineQueryHandler(whisper_inline_query))
     app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^as:"))
     app.add_handler(CallbackQueryHandler(whisper_callback, pattern=r"^ws:"))
     app.add_handler(CallbackQueryHandler(owner_whisper_callback, pattern=r"^wa:"))
@@ -49,6 +61,6 @@ def main():
         group=10,
     )
     logger.info("AntiSpam bot started")
-    app.run_polling(allowed_updates=["message", "edited_message", "callback_query", "my_chat_member"])
+    app.run_polling(allowed_updates=["message", "edited_message", "callback_query", "inline_query", "my_chat_member"])
 
 if __name__ == "__main__": main()
