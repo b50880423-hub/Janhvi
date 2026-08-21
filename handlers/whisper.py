@@ -1,4 +1,4 @@
-import html, secrets, re
+import html, secrets
 from datetime import datetime, timezone, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatType
@@ -9,6 +9,14 @@ from utils.whisper_crypto import encrypt_text, decrypt_text
 
 def _now():
     return datetime.now(timezone.utc)
+
+def _as_utc(value):
+    """Normalize MongoDB/Python datetimes to timezone-aware UTC."""
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 def _wid():
     return secrets.token_hex(4).upper()
@@ -207,156 +215,115 @@ async def whisper_inline_query(update, context):
 
 async def whisper_callback(update, context):
     q = update.callback_query
-    if not q or not q.data:
+    if not q.message or not q.message.chat:
         return
-
     parts = q.data.split(":")
-    if len(parts) < 3:
-        await q.answer("Invalid whisper.", show_alert=True)
-        return
-
-    action = parts[1]
+    if len(parts) < 3: return
     wid = parts[2]
     uid = q.from_user.id
 
-    # Inline-mode callback queries do NOT contain q.message.
-    # They contain inline_message_id instead. The previous code returned
-    # immediately when q.message was missing, so Open Whisper did nothing.
-    if action == "inline":
-        pending = await mongo.whispers.find_one({
-            "whisper_id": wid,
-            "status": "pending_inline",
-        })
-
+    # Inline whispers are finalized only after they are inserted into a group.
+    if parts[1] == "inline":
+        pending = await mongo.whispers.find_one({"whisper_id": wid, "status": "pending_inline"})
         if not pending:
-            await q.answer(
-                "Invalid whisper! Please create another one!",
-                show_alert=True,
-            )
+            await q.answer("Invalid or expired whisper! Please create another one.", show_alert=True)
             return
-
-        expires_at = pending.get("expires_at")
-        if expires_at and expires_at < _now():
+        if _as_utc(pending.get("expires_at")) and _as_utc(pending.get("expires_at")) < _now():
             await mongo.whispers.delete_one({"whisper_id": wid})
-            await q.answer(
-                "Whisper expired! Please create another one!",
-                show_alert=True,
-            )
+            await q.answer("Whisper expired! Please create another one.", show_alert=True)
             return
-
-        sender_id = int(pending["sender_id"])
-        recipient_username = (pending.get("recipient_username") or "").strip()
-
-        # Sender may open their own whisper.
-        allowed = uid == sender_id
-
-        # Inline queries have no destination group id, so resolve the
-        # recipient globally from the users collection.
-        if not allowed and recipient_username:
+        if uid != pending["sender_id"]:
             from database.mongo import users
+            username = pending.get("recipient_username")
             target_doc = await users.find_one({
-                "username": {
-                    "$regex": f"^{re.escape(recipient_username)}$",
-                    "$options": "i",
-                }
+                "username": {"$regex": f"^{__import__('re').escape(username)}$", "$options": "i"}
             })
-            allowed = bool(
-                target_doc and int(target_doc.get("user_id", 0)) == uid
-            )
+            if not target_doc or int(target_doc.get("user_id", 0)) != uid:
+                await q.answer("🔒 This whisper is not for you.", show_alert=True)
+                return
+        else:
+            target_doc = None
 
-        if not allowed:
-            await q.answer(
-                "🔒 This whisper is not for you.",
-                show_alert=True,
-            )
+        from database.mongo import users
+        if target_doc is None:
+            username = pending.get("recipient_username")
+            target_doc = await users.find_one({
+                "username": {"$regex": f"^{__import__('re').escape(username)}$", "$options": "i"}
+            })
+        if not target_doc:
+            await q.answer("I haven't seen that username yet. Ask the user to interact with the bot first.", show_alert=True)
             return
 
+        recipient_id = int(target_doc["user_id"])
+        if uid not in (pending["sender_id"], recipient_id):
+            await q.answer("🔒 This whisper is not for you.", show_alert=True)
+            return
+
+        final_doc = {
+            "whisper_id": wid, "conversation_id": _cid(),
+            "chat_id": q.message.chat.id,
+            "sender_id": pending["sender_id"], "recipient_id": recipient_id,
+            "sender_username": pending.get("sender_username"),
+            "recipient_username": pending.get("recipient_username"),
+            "sender_name": pending.get("sender_name"),
+            "recipient_name": target_doc.get("first_name") or pending.get("recipient_username"),
+            "anonymous": False,
+            "messages": [{"message_id": 1, "sender_id": pending["sender_id"],
+                          "text": pending["text"], "created_at": _now(), "edited": False}],
+            "created_at": pending["created_at"], "updated_at": _now(),
+            "status": "active", "public_message_id": q.message.message_id,
+        }
+        await mongo.whispers.replace_one({"whisper_id": wid}, final_doc, upsert=True)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
+                                    [InlineKeyboardButton("💬 Reply", callback_data=f"ws:reply:{wid}"),
+                                     InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")]])
         try:
-            secret_text = decrypt_text(pending.get("text", ""))
+            await q.edit_message_text(
+                f"🔐 <b>A whisper message to @{html.escape(pending.get('recipient_username') or 'user')}</b>\n"
+                "Only they can open this whisper.",
+                parse_mode="HTML", reply_markup=kb
+            )
         except Exception:
-            secret_text = ""
-
-        secret_text = secret_text.strip() or "This whisper is empty."
-
-        # Telegram callback alerts are limited to about 200 characters.
+            pass
+        messages = [decrypt_text(m["text"]) for m in final_doc.get("messages", [])]
+        secret_text = "\n\n──────────\n\n".join(messages).strip() or "This whisper is empty."
         if len(secret_text) > 195:
             secret_text = secret_text[:192] + "…"
-
-        # This creates the native Telegram popup. It does NOT open the bot DM.
         await q.answer(secret_text, show_alert=True)
-        return
-
-    # Normal /whisper callback messages have a real message/chat attached.
-    if not q.message or not q.message.chat:
-        await q.answer(
-            "This whisper action is unavailable here.",
-            show_alert=True,
-        )
         return
 
     doc = await mongo.whispers.find_one({"whisper_id": wid})
     if not doc:
-        await q.answer("Whisper no longer exists.", show_alert=True)
-        return
-
-    chat_id = q.message.chat.id
-
-    if action == "block":
+        await q.answer("Whisper no longer exists.", show_alert=True); return
+    if parts[1] == "block":
         if uid not in (doc["sender_id"], doc["recipient_id"]):
-            await q.answer(
-                "Only conversation participants can block.",
-                show_alert=True,
-            )
-            return
-
+            await q.answer("Only conversation participants can block.", show_alert=True); return
         from database.mongo import users
         other = doc["sender_id"] if uid == doc["recipient_id"] else doc["recipient_id"]
-        await users.update_one(
-            {"chat_id": chat_id, "user_id": uid},
-            {"$addToSet": {"blocked_users": other}},
-            upsert=True,
-        )
-        await q.answer("User blocked.", show_alert=True)
-        return
-
+        await users.update_one({"chat_id": doc["chat_id"], "user_id": uid}, {"$addToSet": {"blocked_users": other}}, upsert=True)
+        await q.answer("User blocked.", show_alert=True); return
     if uid not in (doc["sender_id"], doc["recipient_id"]):
-        await q.answer("🚫 Access denied.", show_alert=True)
-        return
-
-    if action == "open":
+        await q.answer("🚫 Access denied.", show_alert=True); return
+    if parts[1] == "open":
+        # Show ONLY the decrypted whisper text in Telegram's native alert.
+        # Do NOT open the bot DM and do NOT send a second message.
         messages = [decrypt_text(m["text"]) for m in doc.get("messages", [])]
         secret_text = "\n\n──────────\n\n".join(messages).strip()
         if not secret_text:
             secret_text = "This whisper is empty."
-
+        # Telegram limits callback-answer text to 200 characters.
         if len(secret_text) > 195:
             secret_text = secret_text[:192] + "…"
-
         await q.answer(secret_text, show_alert=True)
         return
-
-    if action == "reply":
+    if parts[1] == "reply":
         await mongo.whisper_sessions.update_one(
-            {"chat_id": chat_id, "user_id": uid},
-            {
-                "$set": {
-                    "whisper_id": wid,
-                    "expires_at": _now() + timedelta(minutes=5),
-                }
-            },
-            upsert=True,
+            {"chat_id": doc["chat_id"], "user_id": uid},
+            {"$set": {"whisper_id": wid, "expires_at": _now()+timedelta(minutes=5)}},
+            upsert=True
         )
         await q.answer("Reply mode enabled for 5 minutes.", show_alert=True)
-
-        try:
-            await context.bot.send_message(
-                uid,
-                f"💬 Send your reply to whisper <code>{wid}</code> now.\n"
-                "It will be posted as a protected whisper card in the group.",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+        await context.bot.send_message(uid, f"💬 Send your reply to whisper <code>{wid}</code> now.\nIt will be posted as a protected whisper card in the group.", parse_mode="HTML")
 
 async def whisper_message_handler(update, context):
     msg = update.effective_message
