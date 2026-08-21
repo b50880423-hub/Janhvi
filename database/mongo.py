@@ -27,6 +27,7 @@ async def connect_db():
     await groups.create_index("chat_id", unique=True)
     await users.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
     await users.create_index([("chat_id", 1), ("username", 1)])
+    await users.create_index("username")
     await violations.create_index([("chat_id", 1), ("user_id", 1)])
     await events.create_index("created_at")
     await whispers.create_index("whisper_id", unique=True)
@@ -34,6 +35,7 @@ async def connect_db():
     await whispers.create_index([("chat_id", 1), ("sender_id", 1)])
     await whispers.create_index([("chat_id", 1), ("recipient_id", 1)])
     await whispers.create_index([("chat_id", 1), ("conversation_id", 1)])
+    await whispers.create_index("expires_at", expireAfterSeconds=0)
     await whisper_sessions.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
     await whisper_sessions.create_index("expires_at", expireAfterSeconds=0)
 
