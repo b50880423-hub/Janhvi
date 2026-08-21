@@ -1,6 +1,9 @@
-import html, secrets
+import html, secrets, re
 from datetime import datetime, timezone, timedelta
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    InlineKeyboardButton, InlineKeyboardMarkup,
+    InlineQueryResultArticle, InputTextMessageContent,
+)
 from telegram.constants import ChatType
 from database.mongo import get_user, upsert_user
 import database.mongo as mongo
@@ -25,6 +28,196 @@ async def remember_user(message):
             "last_name": u.last_name,
             "last_seen_at": _now()
         })
+
+
+def _norm_username(username):
+    if not username:
+        return None
+    return str(username).lstrip("@").strip().lower() or None
+
+
+async def _find_user_by_username(username):
+    username = _norm_username(username)
+    if not username:
+        return None
+    try:
+        return await mongo.users.find_one({
+            "username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}
+        })
+    except Exception:
+        return None
+
+
+async def _whisper_deep_link(context, wid):
+    username = getattr(context.bot, "username", None)
+    if not username:
+        me = await context.bot.get_me()
+        username = me.username
+    return f"https://t.me/{username}?start=ws_{wid}"
+
+
+def _inline_card(target_username):
+    target = f"@{target_username}" if target_username else "this user"
+    return (
+        f"🔐 <b>A whisper message to {html.escape(target)}</b>\n"
+        "Only they can read the message."
+    )
+
+
+async def whisper_inline_query(update, context):
+    """Psst-style inline whisper: @BotUsername @target secret text."""
+    iq = update.inline_query
+    if not iq:
+        return
+
+    query = (iq.query or "").strip()
+    if not query:
+        await iq.answer([], cache_time=0, is_personal=True)
+        return
+
+    parts = query.split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        result = InlineQueryResultArticle(
+            id="whisper_help",
+            title="🤫 Whisper",
+            description="Use: @username secret message",
+            input_message_content=InputTextMessageContent(
+                "🤫 <b>Whisper</b>\n\n"
+                "Type <code>@username secret message</code>.",
+                parse_mode="HTML",
+            ),
+        )
+        await iq.answer([result], cache_time=0, is_personal=True)
+        return
+
+    raw_target, secret_text = parts[0].strip(), parts[1].strip()
+    target_id = None
+    target_username = None
+    target_label = raw_target
+
+    if raw_target.startswith("@"):
+        target_username = _norm_username(raw_target)
+        known = await _find_user_by_username(target_username)
+        if known:
+            target_id = known.get("user_id")
+            target_label = f"@{target_username}"
+    elif raw_target.lstrip("-").isdigit():
+        target_id = int(raw_target)
+        target_label = raw_target
+    else:
+        await iq.answer([], cache_time=0, is_personal=True)
+        return
+
+    if target_id and target_id == iq.from_user.id:
+        await iq.answer([], cache_time=0, is_personal=True)
+        return
+
+    wid = _wid()
+    now = _now()
+    doc = {
+        "whisper_id": wid,
+        "conversation_id": _cid(),
+        "chat_id": None,
+        "sender_id": iq.from_user.id,
+        "recipient_id": target_id,
+        "sender_username": _norm_username(iq.from_user.username),
+        "recipient_username": target_username,
+        "sender_name": iq.from_user.full_name,
+        "recipient_name": target_label,
+        "anonymous": False,
+        "source": "inline",
+        "status": "draft",
+        "expires_at": now + timedelta(minutes=15),
+        "messages": [{
+            "message_id": 1,
+            "sender_id": iq.from_user.id,
+            "text": encrypt_text(secret_text),
+            "created_at": now,
+            "edited": False,
+        }],
+        "created_at": now,
+        "updated_at": now,
+        "public_message_id": None,
+        "inline_message_id": None,
+    }
+    await mongo.whispers.insert_one(doc)
+
+    deep_link = await _whisper_deep_link(context, wid)
+    result = InlineQueryResultArticle(
+        id=wid,
+        title=f"🔐 Whisper to {target_label}",
+        description="Only the target user can open this whisper.",
+        input_message_content=InputTextMessageContent(
+            _inline_card(target_username or target_label),
+            parse_mode="HTML",
+        ),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔓 Open Whisper", url=deep_link)
+        ]]),
+    )
+    await iq.answer([result], cache_time=0, is_personal=True)
+
+
+async def open_whisper_start(update, context, whisper_id):
+    """Handle /start ws_<id> from the Open Whisper deep-link button."""
+    user = update.effective_user
+    msg = update.effective_message
+    if not user or not msg:
+        return False
+
+    doc = await mongo.whispers.find_one({"whisper_id": whisper_id})
+    if not doc:
+        await msg.reply_text(
+            "❌ <b>Invalid whisper!</b>\nPlease create another one.",
+            parse_mode="HTML",
+        )
+        return True
+
+    if doc.get("status") == "draft":
+        expires_at = doc.get("expires_at")
+        if expires_at and expires_at < _now():
+            await mongo.whispers.delete_one({"whisper_id": whisper_id})
+            await msg.reply_text(
+                "❌ <b>Invalid whisper!</b>\nPlease create another one.",
+                parse_mode="HTML",
+            )
+            return True
+
+    recipient_id = doc.get("recipient_id")
+    recipient_username = _norm_username(doc.get("recipient_username"))
+    current_username = _norm_username(user.username)
+
+    # Recipient only. Sender and every other user are rejected.
+    allowed = bool(recipient_id and user.id == recipient_id)
+    if not allowed and recipient_username:
+        allowed = current_username == recipient_username
+
+    if not allowed:
+        await msg.reply_text(
+            "❌ <b>Invalid whisper!</b>\nPlease create another one.",
+            parse_mode="HTML",
+        )
+        return True
+
+    await mongo.whispers.update_one(
+        {"whisper_id": whisper_id},
+        {"$set": {"status": "active", "opened_at": _now(), "updated_at": _now()}, "$unset": {"expires_at": ""}},
+    )
+
+    lines = []
+    for m in doc.get("messages", []):
+        secret = decrypt_text(m.get("text", ""))
+        lines.append(
+            f"👤 <b>{html.escape(doc.get('sender_name') or 'User')}</b>\n"
+            f"{html.escape(secret)}"
+        )
+
+    await msg.reply_text(
+        "🤫 <b>Whisper</b>\n\n" + "\n\n──────────\n\n".join(lines),
+        parse_mode="HTML",
+    )
+    return True
+
 
 async def resolve_target(update):
     msg = update.effective_message
@@ -151,15 +344,33 @@ async def whisper_callback(update, context):
         other = doc["sender_id"] if uid == doc["recipient_id"] else doc["recipient_id"]
         await users.update_one({"chat_id": doc["chat_id"], "user_id": uid}, {"$addToSet": {"blocked_users": other}}, upsert=True)
         await q.answer("User blocked.", show_alert=True); return
-    if uid not in (doc["sender_id"], doc["recipient_id"]):
-        await q.answer("🚫 Access denied.", show_alert=True); return
+    recipient_username = _norm_username(doc.get("recipient_username"))
+    allowed = (
+        (doc.get("recipient_id") and uid == doc.get("recipient_id"))
+        or (recipient_username and _norm_username(q.from_user.username) == recipient_username)
+    )
+    if not allowed:
+        await q.answer("❌ Invalid whisper! Please create another one.", show_alert=True); return
     if parts[1] == "open":
         lines = []
         for m in doc.get("messages", []):
-            who = "You" if m["sender_id"] == uid else (doc.get("sender_name") if uid == doc["recipient_id"] else doc.get("recipient_name"))
-            lines.append(f"👤 <b>{html.escape(who or 'User')}</b>\n{html.escape(decrypt_text(m['text']))}")
-        await q.answer("🔓 Opened privately.", show_alert=True)
-        await context.bot.send_message(chat_id=uid, text="🤫 <b>Whisper</b>\n\n" + "\n\n──────────\n\n".join(lines), parse_mode="HTML")
+            lines.append(
+                f"👤 <b>{html.escape(doc.get('sender_name') or 'User')}</b>\n"
+                f"{html.escape(decrypt_text(m.get('text', '')))}"
+            )
+        plain = "\n\n".join(decrypt_text(m.get("text", "")) for m in doc.get("messages", []))
+        if len(plain) <= 180:
+            await q.answer(plain, show_alert=True)
+        else:
+            try:
+                await context.bot.send_message(
+                    chat_id=uid,
+                    text="🤫 <b>Whisper</b>\n\n" + "\n\n──────────\n\n".join(lines),
+                    parse_mode="HTML",
+                )
+                await q.answer("🔓 Whisper opened in your private chat.", show_alert=True)
+            except Exception:
+                await q.answer(plain[:179] + "…", show_alert=True)
         return
     if parts[1] == "reply":
         await mongo.whisper_sessions.update_one(
