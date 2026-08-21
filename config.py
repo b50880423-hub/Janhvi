@@ -4,6 +4,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DB = os.getenv("MONGO_DB", "antispam_bot")
 LOGGER_CHAT_ID = int(os.getenv("LOGGER_CHAT_ID", "0") or 0)
+WHISPER_ENCRYPTION_KEY = os.getenv("WHISPER_ENCRYPTION_KEY", "")
 
 DEFAULT_SETTINGS = {
     "enabled": True,

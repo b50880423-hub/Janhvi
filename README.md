@@ -89,3 +89,20 @@ Only one process may poll the same Telegram bot token.
 Lock types: `links`, `stickers`, `photos`, `videos`, `gifs`, `documents`, `forwards`, `mentions`, `flood`, `duplicate`, `badwords`, `all`.
 
 Automatic moderation remains **delete + temporary mute only**: 30m, 1h, 2h, 6h, then 24h for the 5th and every later violation. No automatic permanent bans.
+
+
+## 🤫 Group Whisper System
+
+- `/whisper @username message` — create a protected group whisper
+- Reply to a user's message with `/whisper message` — whisper to that user
+- Only the sender and recipient can open a whisper
+- Protected two-way conversation replies
+- Anonymous content is not posted publicly
+- `/whisperowner` — group owner read-only Whisper Vault
+- Owner can inspect every stored whisper without marking it read, changing expiry, or modifying the conversation
+- Whisper content is encrypted at rest
+- Set `WHISPER_ENCRYPTION_KEY` to a Fernet key for a stable encryption key. If omitted, the bot derives a stable key from `BOT_TOKEN`.
+- Owner audit access is intentionally owner-only; sudo users do not receive whisper-content access automatically.
+
+### Privacy note
+The Owner Vault is an explicit group-owner moderation feature. The bot stores whisper content server-side in encrypted form so the owner can perform read-only audits. This should be disclosed to group members in your own privacy policy/rules.
