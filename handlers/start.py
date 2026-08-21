@@ -3,11 +3,11 @@ from telegram.constants import ChatType
 
 async def start(update, context):
     buttons = [[InlineKeyboardButton("➕ Add me to a group", url=f"https://t.me/{context.bot.username}?startgroup=true")],
-               [InlineKeyboardButton("⚙️ Admin Settings", callback_data="as:refresh")]]
+               [InlineKeyboardButton("🤫 Whisper Help", callback_data="as:refresh")]]
     text = (
-        "🛡️ <b>Advanced AntiSpam Bot</b>\n\n"
-        "I protect Telegram groups from spam, links, floods, repeated messages, "
-        "media spam and other unwanted content.\n\n"
+        "🛡️ <b>Advanced AntiSpam + Group Whisper Bot</b>\n\n"
+        "I protect Telegram groups and provide protected group-to-user whispers.\n\n"
+        "🤫 <b>Whisper:</b> use <code>/whisper @username message</code> or reply to a user's message with <code>/whisper message</code>.\n\n"
         "Add me to your group and make me an administrator."
     )
     await update.message.reply_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(buttons))

@@ -46,6 +46,7 @@ async def help_cmd(update, context):
         "/unblacklist — remove blacklist\n\n"
         "<b>Info</b>\n"
         "/logs — recent moderation logs\n"
+        "/whisperowner — owner-only read-only Whisper Vault\n"
         "/userinfo [ID] — user info\n"
         "/settings — inline admin panel\n\n"
         "Automatic punishment is <b>delete + temporary mute only</b>; 5th+ violations are 24h mutes.",
