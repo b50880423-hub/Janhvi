@@ -2,7 +2,8 @@ import html, secrets
 from datetime import datetime, timezone, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatType
-from database.mongo import get_user, upsert_user, whispers, whisper_sessions
+from database.mongo import get_user, upsert_user
+import database.mongo as mongo
 from utils.permissions import is_group_owner
 from utils.whisper_crypto import encrypt_text, decrypt_text
 
@@ -118,7 +119,7 @@ async def whisper_command(update, context):
         "created_at": _now(), "updated_at": _now(), "status": "active",
         "public_message_id": None
     }
-    await whispers.insert_one(doc)
+    await mongo.whispers.insert_one(doc)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
                                [InlineKeyboardButton("💬 Reply", callback_data=f"ws:reply:{wid}"),
                                 InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")]])
@@ -129,7 +130,7 @@ async def whisper_command(update, context):
         f"🆔 <code>{wid}</code>",
         parse_mode="HTML", reply_markup=kb
     )
-    await whispers.update_one({"whisper_id": wid}, {"$set": {"public_message_id": card.message_id}})
+    await mongo.whispers.update_one({"whisper_id": wid}, {"$set": {"public_message_id": card.message_id}})
     await msg.reply_text("✅ Whisper created. The message content is not posted publicly.", quote=True)
 
 async def whisper_callback(update, context):
@@ -139,7 +140,7 @@ async def whisper_callback(update, context):
     parts = q.data.split(":")
     if len(parts) < 3: return
     wid = parts[2]
-    doc = await whispers.find_one({"whisper_id": wid})
+    doc = await mongo.whispers.find_one({"whisper_id": wid})
     if not doc:
         await q.answer("Whisper no longer exists.", show_alert=True); return
     uid = q.from_user.id
@@ -161,7 +162,7 @@ async def whisper_callback(update, context):
         await context.bot.send_message(chat_id=uid, text="🤫 <b>Whisper</b>\n\n" + "\n\n──────────\n\n".join(lines), parse_mode="HTML")
         return
     if parts[1] == "reply":
-        await whisper_sessions.update_one(
+        await mongo.whisper_sessions.update_one(
             {"chat_id": doc["chat_id"], "user_id": uid},
             {"$set": {"whisper_id": wid, "expires_at": _now()+timedelta(minutes=5)}},
             upsert=True
@@ -174,18 +175,18 @@ async def whisper_message_handler(update, context):
     if not msg or not msg.from_user or msg.from_user.is_bot or msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
     await remember_user(msg)
-    session = await whisper_sessions.find_one({"chat_id": msg.chat.id, "user_id": msg.from_user.id})
+    session = await mongo.whisper_sessions.find_one({"chat_id": msg.chat.id, "user_id": msg.from_user.id})
     if not session: return
-    await whisper_sessions.delete_one({"chat_id": msg.chat.id, "user_id": msg.from_user.id})
+    await mongo.whisper_sessions.delete_one({"chat_id": msg.chat.id, "user_id": msg.from_user.id})
     text = msg.text or msg.caption
     if not text:
         await msg.reply_text("❌ Reply mode currently accepts text. Use /whisper for a new conversation.")
         return
-    doc = await whispers.find_one({"whisper_id": session["whisper_id"]})
+    doc = await mongo.whispers.find_one({"whisper_id": session["whisper_id"]})
     if not doc or msg.from_user.id not in (doc["sender_id"], doc["recipient_id"]):
         return
     new_id = len(doc.get("messages", [])) + 1
-    await whispers.update_one({"whisper_id": doc["whisper_id"]}, {"$push": {"messages": {
+    await mongo.whispers.update_one({"whisper_id": doc["whisper_id"]}, {"$push": {"messages": {
         "message_id": new_id, "sender_id": msg.from_user.id, "text": encrypt_text(text),
         "created_at": _now(), "edited": False
     }}, "$set": {"updated_at": _now()}})
@@ -199,7 +200,7 @@ async def owner_whisper_panel(update, context):
     if not msg or msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP): return
     if not await is_group_owner(context.bot, msg.chat.id, msg.from_user.id):
         await msg.reply_text("❌ Group owner only."); return
-    count = await whispers.count_documents({"chat_id": msg.chat.id})
+    count = await mongo.whispers.count_documents({"chat_id": msg.chat.id})
     kb=InlineKeyboardMarkup([[InlineKeyboardButton("📨 All Whispers", callback_data="wa:list:0"),
                               InlineKeyboardButton("🔎 Search", callback_data="wa:search")]])
     await msg.reply_text(f"👑 <b>Whisper Owner Vault</b>\n\n📨 Total whispers: <b>{count}</b>\n\nRead-only audit access: viewing never marks user messages read or changes the conversation.", parse_mode="HTML", reply_markup=kb)
@@ -215,7 +216,7 @@ async def owner_whisper_callback(update, context):
     page=int(value) if value.isdigit() else 0
     from database.mongo import whispers
     if action=="list":
-        docs=await whispers.find({"chat_id":q.message.chat.id}).sort("created_at",-1).skip(page*8).limit(8).to_list(length=8)
+        docs=await mongo.whispers.find({"chat_id":q.message.chat.id}).sort("created_at",-1).skip(page*8).limit(8).to_list(length=8)
         if not docs:
             await q.answer("No whispers found.", show_alert=True); return
         rows=[]
@@ -229,7 +230,7 @@ async def owner_whisper_callback(update, context):
         rows.append([InlineKeyboardButton("🔙 Vault",callback_data="wa:panel:0")])
         await q.edit_message_text("📨 <b>All Whispers — Read Only</b>\n\nSelect a conversation:",parse_mode="HTML",reply_markup=InlineKeyboardMarkup(rows))
     elif action=="view":
-        d=await whispers.find_one({"whisper_id":value})
+        d=await mongo.whispers.find_one({"whisper_id":value})
         # page is nonnumeric whisper id for view
         if not d:
             await q.answer("Whisper not found.",show_alert=True); return
@@ -239,5 +240,5 @@ async def owner_whisper_callback(update, context):
             lines.append(f"<b>{html.escape(who or 'User')}</b>  •  {m['created_at'].strftime('%Y-%m-%d %H:%M UTC') if hasattr(m['created_at'],'strftime') else ''}\n{html.escape(decrypt_text(m['text']))}")
         await q.edit_message_text("👑 <b>Owner Read-Only View</b>\n\n"+"\n\n──────────\n\n".join(lines)+"\n\n🔒 No read status, expiry, or conversation state was changed.",parse_mode="HTML",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back",callback_data="wa:list:0")]]))
     elif action=="panel":
-        count=await whispers.count_documents({"chat_id":q.message.chat.id})
+        count=await mongo.whispers.count_documents({"chat_id":q.message.chat.id})
         await q.edit_message_text(f"👑 <b>Whisper Owner Vault</b>\n\n📨 Total whispers: <b>{count}</b>",parse_mode="HTML",reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("📨 All Whispers",callback_data="wa:list:0")]]))
