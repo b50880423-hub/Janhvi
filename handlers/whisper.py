@@ -133,6 +133,80 @@ async def whisper_command(update, context):
     await mongo.whispers.update_one({"whisper_id": wid}, {"$set": {"public_message_id": card.message_id}})
     await msg.reply_text("✅ Whisper created. The message content is not posted publicly.", quote=True)
 
+
+
+async def whisper_inline_query(update, context):
+    """Create an inline whisper draft. The draft becomes a real group whisper
+    when the inline result's Open Whisper button is pressed. This keeps the
+    message in the group and never sends the user to the bot DM.
+    """
+    iq = update.inline_query
+    if not iq or not iq.from_user:
+        return
+
+    query = (iq.query or "").strip()
+    if not query:
+        await iq.answer([], cache_time=0, is_personal=True,
+                        switch_pm_text="Type @username message",
+                        switch_pm_parameter="whisper_help")
+        return
+
+    parts = query.split(maxsplit=1)
+    if len(parts) < 2:
+        await iq.answer([], cache_time=0, is_personal=True)
+        return
+
+    raw_target = parts[0].strip()
+    text = parts[1].strip()
+    if not raw_target.startswith("@") or not text:
+        await iq.answer([], cache_time=0, is_personal=True)
+        return
+
+    target_username = raw_target[1:].strip().lower()
+    if not target_username or len(target_username) > 32:
+        await iq.answer([], cache_time=0, is_personal=True)
+        return
+    if len(text) > 4000:
+        text = text[:4000]
+
+    # InlineQuery has no destination group/chat id. Store a short-lived draft;
+    # the callback that runs in the destination group supplies the chat id.
+    token = _cid()
+    pending = {
+        "whisper_id": token,
+        "status": "pending_inline",
+        "sender_id": iq.from_user.id,
+        "sender_username": iq.from_user.username,
+        "sender_name": iq.from_user.full_name,
+        "recipient_username": target_username,
+        "text": encrypt_text(text),
+        "created_at": _now(),
+        "expires_at": _now() + timedelta(minutes=10),
+    }
+    await mongo.whispers.update_one(
+        {"whisper_id": token}, {"$set": pending}, upsert=True
+    )
+
+    from telegram import InlineQueryResultArticle, InputTextMessageContent
+
+    card = (
+        f"🔐 <b>A whisper message to @{html.escape(target_username)}</b>\n"
+        "Only they can open this whisper."
+    )
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:inline:{token}")
+    ]])
+    result = InlineQueryResultArticle(
+        id=token,
+        title=f"🔐 Whisper to @{target_username}",
+        description="Only the selected user can open this whisper.",
+        input_message_content=InputTextMessageContent(
+            card, parse_mode="HTML"
+        ),
+        reply_markup=keyboard,
+    )
+    await iq.answer([result], cache_time=0, is_personal=True)
+
 async def whisper_callback(update, context):
     q = update.callback_query
     if not q.message or not q.message.chat:
@@ -140,10 +214,81 @@ async def whisper_callback(update, context):
     parts = q.data.split(":")
     if len(parts) < 3: return
     wid = parts[2]
+    uid = q.from_user.id
+
+    # Inline whispers are finalized only after they are inserted into a group.
+    if parts[1] == "inline":
+        pending = await mongo.whispers.find_one({"whisper_id": wid, "status": "pending_inline"})
+        if not pending:
+            await q.answer("Invalid or expired whisper! Please create another one.", show_alert=True)
+            return
+        if pending.get("expires_at") and pending["expires_at"] < _now():
+            await mongo.whispers.delete_one({"whisper_id": wid})
+            await q.answer("Whisper expired! Please create another one.", show_alert=True)
+            return
+        if uid != pending["sender_id"]:
+            from database.mongo import users
+            username = pending.get("recipient_username")
+            target_doc = await users.find_one({
+                "username": {"$regex": f"^{__import__('re').escape(username)}$", "$options": "i"}
+            })
+            if not target_doc or int(target_doc.get("user_id", 0)) != uid:
+                await q.answer("🔒 This whisper is not for you.", show_alert=True)
+                return
+        else:
+            target_doc = None
+
+        from database.mongo import users
+        if target_doc is None:
+            username = pending.get("recipient_username")
+            target_doc = await users.find_one({
+                "username": {"$regex": f"^{__import__('re').escape(username)}$", "$options": "i"}
+            })
+        if not target_doc:
+            await q.answer("I haven't seen that username yet. Ask the user to interact with the bot first.", show_alert=True)
+            return
+
+        recipient_id = int(target_doc["user_id"])
+        if uid not in (pending["sender_id"], recipient_id):
+            await q.answer("🔒 This whisper is not for you.", show_alert=True)
+            return
+
+        final_doc = {
+            "whisper_id": wid, "conversation_id": _cid(),
+            "chat_id": q.message.chat.id,
+            "sender_id": pending["sender_id"], "recipient_id": recipient_id,
+            "sender_username": pending.get("sender_username"),
+            "recipient_username": pending.get("recipient_username"),
+            "sender_name": pending.get("sender_name"),
+            "recipient_name": target_doc.get("first_name") or pending.get("recipient_username"),
+            "anonymous": False,
+            "messages": [{"message_id": 1, "sender_id": pending["sender_id"],
+                          "text": pending["text"], "created_at": _now(), "edited": False}],
+            "created_at": pending["created_at"], "updated_at": _now(),
+            "status": "active", "public_message_id": q.message.message_id,
+        }
+        await mongo.whispers.replace_one({"whisper_id": wid}, final_doc, upsert=True)
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
+                                    [InlineKeyboardButton("💬 Reply", callback_data=f"ws:reply:{wid}"),
+                                     InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")]])
+        try:
+            await q.edit_message_text(
+                f"🔐 <b>A whisper message to @{html.escape(pending.get('recipient_username') or 'user')}</b>\n"
+                "Only they can open this whisper.",
+                parse_mode="HTML", reply_markup=kb
+            )
+        except Exception:
+            pass
+        messages = [decrypt_text(m["text"]) for m in final_doc.get("messages", [])]
+        secret_text = "\n\n──────────\n\n".join(messages).strip() or "This whisper is empty."
+        if len(secret_text) > 195:
+            secret_text = secret_text[:192] + "…"
+        await q.answer(secret_text, show_alert=True)
+        return
+
     doc = await mongo.whispers.find_one({"whisper_id": wid})
     if not doc:
         await q.answer("Whisper no longer exists.", show_alert=True); return
-    uid = q.from_user.id
     if parts[1] == "block":
         if uid not in (doc["sender_id"], doc["recipient_id"]):
             await q.answer("Only conversation participants can block.", show_alert=True); return
