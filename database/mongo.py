@@ -79,6 +79,10 @@ async def add_violation(chat_id, user_id, reason, decay_hours=24):
     doc = await violations.find_one({"chat_id": chat_id, "user_id": user_id})
     count = int(doc.get("count", 0)) if doc else 0
     last = doc.get("last_at") if doc else None
+    # Older MongoDB records may contain timezone-naive datetimes.
+    # Normalize them to UTC before comparing with the timezone-aware `now`.
+    if last is not None and getattr(last, "tzinfo", None) is None:
+        last = last.replace(tzinfo=timezone.utc)
     if last and decay_hours and last < now - timedelta(hours=max(1, int(decay_hours))):
         count = 0
     count += 1
