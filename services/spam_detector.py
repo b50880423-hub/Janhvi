@@ -72,3 +72,5 @@ def has_badword(message, custom_filters=None):
 def mention_count(message):
     text = message.text or message.caption or ""
     return len(re.findall(r"@\w+", text)) + len(re.findall(r"https?://t\.me/", text, re.I))
+
+    # end class extension placeholder

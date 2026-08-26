@@ -27,3 +27,44 @@ async def settings_callback(update, context):
         await q.edit_message_reply_markup(reply_markup=settings_keyboard(s))
     except Exception:
         pass
+
+async def security_callback(update, context):
+    q=update.callback_query; await q.answer()
+    if not q.message or not await is_admin(context.bot,q.message.chat.id,q.from_user.id):
+        return await q.answer('Admins only.',show_alert=True)
+    data=q.data.split(':',1)[1]; s=await get_group(q.message.chat.id,DEFAULT_SETTINGS)
+    if data=='mode':
+        modes=['adaptive','community','strict','gaming','announcement']; new=modes[(modes.index(s.get('mode','adaptive'))+1)%len(modes)]
+        await update_group(q.message.chat.id,{'mode':new})
+    else: await update_group(q.message.chat.id,{data:not bool(s.get(data,False))})
+    await q.answer('Updated. Open /security to refresh.')
+
+async def review_callback(update, context):
+    from telegram import ChatPermissions
+    from database.mongo import get_group, upsert_user
+    from services.review_queue import resolve_review
+    from datetime import datetime, timezone
+    q=update.callback_query; await q.answer()
+    parts=q.data.split(':')
+    if len(parts)!=3: return
+    action, rid=parts[1], parts[2]
+    if not await is_admin(context.bot, q.from_user.id if False else q.message.chat.id, q.from_user.id):
+        return await q.answer('Admins only.', show_alert=True)
+    doc=await resolve_review(rid,action,q.from_user.id)
+    if not doc:return await q.answer('Already resolved or expired.',show_alert=True)
+    chat_id=int(doc['chat_id']); user_id=int(doc['user_id'])
+    try:
+        if action=='mute5':
+            until=int(datetime.now(timezone.utc).timestamp()+300)
+            await context.bot.restrict_chat_member(chat_id,user_id,ChatPermissions.no_permissions(),until_date=until)
+        elif action=='mute60':
+            until=int(datetime.now(timezone.utc).timestamp()+3600)
+            await context.bot.restrict_chat_member(chat_id,user_id,ChatPermissions.no_permissions(),until_date=until)
+        elif action=='trust':
+            await upsert_user(chat_id,user_id,{'trusted':True})
+        if action=='ban':
+            await context.bot.ban_chat_member(chat_id,user_id)
+        label={'delete':'Deleted','ignore':'Ignored','trust':'Trusted','mute5':'Muted 5m','mute60':'Muted 60m','ban':'Banned'}.get(action,action)
+        await q.edit_message_text(f'✅ Review resolved: <b>{label}</b>\nUser ID: <code>{user_id}</code>\nReason: {doc.get("reason")}',parse_mode='HTML')
+    except Exception as e:
+        await q.answer(f'Action failed: {str(e)[:80]}',show_alert=True)

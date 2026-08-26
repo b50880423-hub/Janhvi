@@ -59,14 +59,31 @@ async def get_user(chat_id, user_id):
 async def upsert_user(chat_id, user_id, data):
     await users.update_one({"chat_id": chat_id, "user_id": user_id}, {"$set": data}, upsert=True)
 
-async def add_violation(chat_id, user_id, reason):
+async def get_user_by_username(chat_id, username):
+    username = (username or "").lstrip("@").strip().lower()
+    if not username:
+        return None
+    return await users.find_one({
+        "chat_id": chat_id,
+        "username": {"$regex": "^" + __import__("re").escape(username) + "$", "$options": "i"},
+    })
+
+async def add_violation(chat_id, user_id, reason, decay_hours=24):
+    """Add a violation, but reset stale history after a clean period."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc)
+    doc = await violations.find_one({"chat_id": chat_id, "user_id": user_id})
+    count = int(doc.get("count", 0)) if doc else 0
+    last = doc.get("last_at") if doc else None
+    if last and decay_hours and last < now - timedelta(hours=max(1, int(decay_hours))):
+        count = 0
+    count += 1
     await violations.update_one(
         {"chat_id": chat_id, "user_id": user_id},
-        {"$inc": {"count": 1}, "$set": {"last_reason": reason}},
+        {"$set": {"count": count, "last_reason": reason, "last_at": now, "updated_at": now}},
         upsert=True
     )
-    doc = await violations.find_one({"chat_id": chat_id, "user_id": user_id})
-    return int(doc.get("count", 0))
+    return count
 
 async def reset_violations(chat_id, user_id):
     await violations.update_one({"chat_id": chat_id, "user_id": user_id}, {"$set": {"count": 0}})
