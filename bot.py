@@ -5,9 +5,9 @@ from database.mongo import connect_db
 from handlers.start import start
 from handlers.admin import (
     settings, help_cmd, warn, mute, unmute, whitelist, unwhitelist, blacklist, unblacklist,
-    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue
+    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal
 )
-from handlers.callbacks import settings_callback, security_callback, review_callback
+from handlers.callbacks import settings_callback, security_callback, review_callback, appeal_callback
 from handlers.moderation import moderate_message, monitor_member
 from handlers.whisper import (
     whisper_command, whisper_callback, whisper_inline_query, whisper_message_handler,
@@ -26,7 +26,7 @@ def main():
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is missing")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     commands = {
-        "start": start, "help": help_cmd, "settings": settings,
+        "start": start, "help": help_cmd, "settings": settings, "appeal": appeal,
         "warn": warn, "mute": mute, "unmute": unmute,
         "whitelist": whitelist, "unwhitelist": unwhitelist,
         "blacklist": blacklist, "unblacklist": unblacklist,
@@ -41,6 +41,7 @@ def main():
     app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^as:"))
     app.add_handler(CallbackQueryHandler(security_callback, pattern=r"^sec:"))
     app.add_handler(CallbackQueryHandler(review_callback, pattern=r"^rv:"))
+    app.add_handler(CallbackQueryHandler(appeal_callback, pattern=r"^ap:"))
     app.add_handler(InlineQueryHandler(whisper_inline_query))
     app.add_handler(CallbackQueryHandler(whisper_callback, pattern=r"^ws:"))
     app.add_handler(CallbackQueryHandler(owner_whisper_callback, pattern=r"^wa:"))
