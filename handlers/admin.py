@@ -1,10 +1,11 @@
 from datetime import datetime, timedelta, timezone
-from telegram import ChatPermissions
+from telegram import ChatPermissions, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus
 from database.mongo import (
     get_group, update_group, get_violation_count, reset_violations,
     upsert_user, get_user, get_user_by_username, get_recent_events, log_event
 )
+from database.mongo import save_mute_record, get_mute_record, create_appeal
 from config import DEFAULT_SETTINGS, LOGGER_CHAT_ID
 from utils.permissions import is_admin
 from utils.keyboards import settings_keyboard
@@ -32,6 +33,7 @@ async def help_cmd(update, context):
         "/resetwarnings — reset warnings\n"
         "/mute [minutes] — mute replied user\n"
         "/mute <user_id|@username> [minutes] — manually mute user\n"
+        "/appeal <reason> — appeal a mute (use in bot DM)\n"
         "/unmute — unmute replied user\n"
         "/unmute <user_id|@username> — manually unmute user\n\n"
         "<b>Protection</b>\n"
@@ -133,9 +135,12 @@ async def mute(update, context):
         await update.effective_chat.restrict_member(
             user_id, permissions=ChatPermissions.no_permissions(), until_date=until
         )
-        await update.effective_message.reply_text(
-            f"🔇 Muted {display} for {minutes} minutes.", parse_mode="HTML"
-        )
+        await save_mute_record(update.effective_chat.id, user_id, minutes, "Manual admin mute")
+        await update.effective_message.reply_text(f"🔇 Muted {display} for {minutes} minutes.", parse_mode="HTML")
+        try:
+            await context.bot.send_message(user_id, f"🔇 <b>You were muted</b> in <b>{update.effective_chat.title}</b> for {minutes} minutes.\nReason: Manual admin mute\n\nIf you believe this was a mistake, send me /appeal followed by your explanation.", parse_mode="HTML")
+        except Exception:
+            pass
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Could not mute: {e}")
 
@@ -508,3 +513,28 @@ async def reviewqueue(update, context):
     lines=['📋 <b>OPEN REVIEW QUEUE</b>']
     for x in items:lines.append(f"• <code>{x.get('user_id')}</code> — {x.get('reason')} — risk {x.get('risk_score')}/100")
     await update.effective_message.reply_text('\n'.join(lines),parse_mode='HTML')
+
+
+async def appeal(update, context):
+    # This command is designed for the bot's private chat.
+    if update.effective_chat.type != "private":
+        return await update.effective_message.reply_text("Please send your appeal to me in private chat. Open the bot and use /appeal <your explanation>.")
+    if not context.args:
+        return await update.effective_message.reply_text("Usage: /appeal <explain why you think the mute should be removed>")
+    user_id=update.effective_user.id
+    text=" ".join(context.args).strip()[:1500]
+    from database.mongo import db
+    rec=await db.mute_records.find_one({"user_id":user_id},sort=[("muted_at",-1)])
+    if not rec:
+        return await update.effective_message.reply_text("I couldn't find a recent mute record for you. Please contact a group admin.")
+    chat_id=int(rec['chat_id'])
+    appeal_doc=await create_appeal(chat_id,user_id,text)
+    from bson import ObjectId
+    aid=str(appeal_doc['_id'])
+    buttons=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Unmute",callback_data=f"ap:unmute:{aid}"),InlineKeyboardButton("⏳ Reduce",callback_data=f"ap:reduce:{aid}")],[InlineKeyboardButton("❌ Reject",callback_data=f"ap:reject:{aid}"),InlineKeyboardButton("⭐ Trust",callback_data=f"ap:trust:{aid}")]])
+    username=(update.effective_user.username and '@'+update.effective_user.username) or update.effective_user.full_name
+    try:
+        await context.bot.send_message(chat_id, f"📩 <b>NEW MUTE APPEAL</b>\n\n👤 User: {username}\n🆔 ID: <code>{user_id}</code>\n🔇 Reason: {rec.get('reason','Unknown')}\n📝 Appeal: {text}", parse_mode='HTML', reply_markup=buttons)
+    except Exception:
+        return await update.effective_message.reply_text("Your appeal could not be delivered to the group admins. Please make sure the bot is still in the group.")
+    await update.effective_message.reply_text("✅ Your appeal has been sent to the group admins. Please wait for their decision.")
