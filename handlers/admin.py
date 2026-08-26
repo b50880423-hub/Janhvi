@@ -31,7 +31,9 @@ async def help_cmd(update, context):
         "/warnings — show warnings\n"
         "/resetwarnings — reset warnings\n"
         "/mute [minutes] — mute replied user\n"
-        "/unmute — unmute replied user\n\n"
+        "/mute <user_id|@username> [minutes] — manually mute user\n"
+        "/unmute — unmute replied user\n"
+        "/unmute <user_id|@username> — manually unmute user\n\n"
         "<b>Protection</b>\n"
         "/antispam — show/toggle protection\n"
         "/lock [type] — lock a content type\n"
@@ -74,28 +76,83 @@ async def warn(update, context):
     c = await add_violation(update.effective_chat.id, u.id, "manual warning")
     await update.effective_message.reply_text(f"⚠️ Warning added to {u.mention_html()}. Total: {c}", parse_mode="HTML")
 
+async def resolve_moderation_target(update, context, args):
+    """Resolve a target from a reply, numeric Telegram ID, or @username."""
+    user = replied_user(update)
+    if user:
+        return user.id, user.mention_html()
+
+    if not args:
+        return None, None
+
+    raw = args[0].strip()
+    if raw.lstrip("-").isdigit():
+        user_id = int(raw)
+        return user_id, f"<code>{user_id}</code>"
+
+    if raw.startswith("@"):
+        try:
+            chat = await context.bot.get_chat(raw)
+            return chat.id, f"@{chat.username}" if chat.username else f"<code>{chat.id}</code>"
+        except Exception:
+            return None, None
+
+    return None, None
+
 async def mute(update, context):
     if not await require_admin(update): return await deny(update)
-    u = replied_user(update)
-    if not u:
-        return await update.effective_message.reply_text("Reply to a user's message. Usage: /mute [minutes]")
-    minutes = int(context.args[0]) if context.args and context.args[0].isdigit() else 30
+
+    args = list(context.args)
+    minutes = 30
+    # /mute <user_id|@username> [minutes]
+    # A reply still supports /mute [minutes].
+    if replied_user(update):
+        if args and args[0].isdigit():
+            minutes = int(args[0])
+    else:
+        if len(args) >= 2 and args[1].isdigit():
+            minutes = int(args[1])
+
+    user_id, display = await resolve_moderation_target(update, context, args)
+    if not user_id:
+        return await update.effective_message.reply_text(
+            "Usage:\n"
+            "• Reply: /mute [minutes]\n"
+            "• User ID: /mute <user_id> [minutes]\n"
+            "• Username: /mute @username [minutes]"
+        )
+
     minutes = max(1, min(minutes, 10080))
     try:
         until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-        await update.effective_chat.restrict_member(u.id, permissions=ChatPermissions.no_permissions(), until_date=until)
-        await update.effective_message.reply_text(f"🔇 Muted {u.mention_html()} for {minutes} minutes.", parse_mode="HTML")
+        await update.effective_chat.restrict_member(
+            user_id, permissions=ChatPermissions.no_permissions(), until_date=until
+        )
+        await update.effective_message.reply_text(
+            f"🔇 Muted {display} for {minutes} minutes.", parse_mode="HTML"
+        )
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Could not mute: {e}")
 
 async def unmute(update, context):
     if not await require_admin(update): return await deny(update)
-    u = replied_user(update)
-    if not u:
-        return await update.effective_message.reply_text("Reply to a user's message.")
+
+    user_id, display = await resolve_moderation_target(update, context, list(context.args))
+    if not user_id:
+        return await update.effective_message.reply_text(
+            "Usage:\n"
+            "• Reply: /unmute\n"
+            "• User ID: /unmute <user_id>\n"
+            "• Username: /unmute @username"
+        )
+
     try:
-        await update.effective_chat.restrict_member(u.id, permissions=ChatPermissions.all_permissions())
-        await update.effective_message.reply_text(f"🔊 Unmuted {u.mention_html()}.", parse_mode="HTML")
+        await update.effective_chat.restrict_member(
+            user_id, permissions=ChatPermissions.all_permissions()
+        )
+        await update.effective_message.reply_text(
+            f"🔊 Unmuted {display}.", parse_mode="HTML"
+        )
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Could not unmute: {e}")
 
