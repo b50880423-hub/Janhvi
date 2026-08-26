@@ -11,7 +11,7 @@ whispers = None
 whisper_sessions = None
 
 async def connect_db():
-    global client, db, groups, users, violations, events, whispers, whisper_sessions
+    global client, db, groups, users, violations, events, whispers, whisper_sessions, mute_records, appeals
     if not MONGO_URI:
         raise RuntimeError("MONGO_URI is missing")
     client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=10000)
@@ -23,6 +23,8 @@ async def connect_db():
     events = db.events
     whispers = db.whispers
     whisper_sessions = db.whisper_sessions
+    mute_records = db.mute_records
+    appeals = db.appeals
 
     await groups.create_index("chat_id", unique=True)
     await users.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
@@ -37,6 +39,8 @@ async def connect_db():
     await whispers.create_index("expires_at", expireAfterSeconds=0)
     await whisper_sessions.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
     await whisper_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await mute_records.create_index([("chat_id", 1), ("user_id", 1)])
+    await appeals.create_index([("chat_id", 1), ("user_id", 1), ("status", 1)])
 
 async def get_group(chat_id, defaults):
     doc = await groups.find_one({"chat_id": chat_id})
@@ -99,3 +103,45 @@ async def get_recent_events(chat_id, limit=10):
 async def log_event(data):
     if events is not None:
         await events.insert_one(data)
+
+# Premium mute appeal system
+mute_records = None
+appeals = None
+
+async def _appeal_collections():
+    global mute_records, appeals
+    if db is None:
+        raise RuntimeError('Database is not connected')
+    if mute_records is None:
+        mute_records = db.mute_records
+        appeals = db.appeals
+        await mute_records.create_index([('chat_id',1),('user_id',1)])
+        await appeals.create_index([('chat_id',1),('user_id',1),('status',1)])
+    return mute_records, appeals
+
+async def save_mute_record(chat_id, user_id, minutes, reason='Manual mute'):
+    mr, _ = await _appeal_collections()
+    from datetime import datetime, timezone, timedelta
+    now=datetime.now(timezone.utc); until=now+timedelta(minutes=minutes)
+    await mr.update_one({'chat_id':chat_id,'user_id':user_id},{'$set':{'chat_id':chat_id,'user_id':user_id,'minutes':minutes,'reason':reason,'muted_at':now,'until':until}},upsert=True)
+    return until
+
+async def get_mute_record(chat_id, user_id):
+    mr,_=await _appeal_collections(); return await mr.find_one({'chat_id':chat_id,'user_id':user_id})
+
+async def create_appeal(chat_id,user_id,text):
+    _,ap=await _appeal_collections()
+    from datetime import datetime, timezone
+    now=datetime.now(timezone.utc)
+    doc={'chat_id':chat_id,'user_id':user_id,'text':text,'status':'pending','created_at':now}
+    r=await ap.insert_one(doc); doc['_id']=r.inserted_id; return doc
+
+async def resolve_appeal(appeal_id, action, admin_id):
+    from bson import ObjectId
+    _,ap=await _appeal_collections()
+    try: oid=ObjectId(appeal_id)
+    except Exception: return None
+    doc=await ap.find_one({'_id':oid,'status':'pending'})
+    if not doc: return None
+    await ap.update_one({'_id':oid},{'$set':{'status':action,'resolved_by':admin_id}})
+    return doc
