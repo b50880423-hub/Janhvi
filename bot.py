@@ -59,6 +59,6 @@ def main():
         group=10,
     )
     logger.info("AntiSpam bot started")
-    app.run_polling(allowed_updates=["message", "edited_message", "callback_query", "inline_query", "my_chat_member"])
+    app.run_polling(allowed_updates=["message", "edited_message", "callback_query", "inline_query", "my_chat_member", "chat_member"])
 
 if __name__ == "__main__": main()
