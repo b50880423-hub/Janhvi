@@ -5,7 +5,7 @@ from database.mongo import connect_db
 from handlers.start import start
 from handlers.admin import (
     settings, help_cmd, warn, mute, unmute, whitelist, unwhitelist, blacklist, unblacklist,
-    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal, promote, promote_callback, demote
+    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal, appeal_flow_callback, appeal_reason_message, promote, promote_callback, demote
 )
 from handlers.callbacks import settings_callback, security_callback, review_callback, appeal_callback
 from handlers.moderation import moderate_message, monitor_member
@@ -26,7 +26,7 @@ def main():
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is missing")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     commands = {
-        "start": start, "help": help_cmd, "settings": settings, "appeal": appeal,
+        "start": start, "help": help_cmd, "settings": settings, "appeal": appeal, "apeal": appeal,
         "warn": warn, "mute": mute, "unmute": unmute,
         "whitelist": whitelist, "unwhitelist": unwhitelist,
         "blacklist": blacklist, "unblacklist": unblacklist,
@@ -43,6 +43,7 @@ def main():
     app.add_handler(CallbackQueryHandler(security_callback, pattern=r"^sec:"))
     app.add_handler(CallbackQueryHandler(review_callback, pattern=r"^rv:"))
     app.add_handler(CallbackQueryHandler(appeal_callback, pattern=r"^ap:"))
+    app.add_handler(CallbackQueryHandler(appeal_flow_callback, pattern=r"^appealflow:"))
     app.add_handler(CallbackQueryHandler(promote_callback, pattern=r"^pr:"))
     app.add_handler(InlineQueryHandler(whisper_inline_query))
     app.add_handler(CallbackQueryHandler(whisper_callback, pattern=r"^ws:"))
@@ -50,6 +51,7 @@ def main():
     app.add_handler(ChatMemberHandler(my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(my_chat_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(monitor_member, ChatMemberHandler.CHAT_MEMBER), group=2)
+    app.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE & ~filters.COMMAND, appeal_reason_message), group=4)
     app.add_handler(
         MessageHandler(filters.ALL, whisper_message_handler),
         group=5,
