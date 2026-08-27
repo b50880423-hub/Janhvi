@@ -796,24 +796,57 @@ PROMOTE_LEVELS = {
     },
     "powerful": {
         "title": "Powerful Admin",
-        "can_delete_messages": True,
-        "can_pin_messages": True,
-        "can_manage_video_chats": True,
         "can_change_info": True,
+        "can_pin_messages": True,
+        "can_delete_messages": True,
+        "can_restrict_members": True,
+        "can_manage_video_chats": True,
+        # Telegram exposes story administration as separate rights.
+        "can_post_stories": True,
+        "can_edit_stories": True,
+        "can_delete_stories": True,
     },
     "destructive": {
         "title": "Destructive Admin",
-        "can_delete_messages": True,
-        "can_pin_messages": True,
-        "can_manage_video_chats": True,
         "can_change_info": True,
+        "can_pin_messages": True,
+        "can_delete_messages": True,
         "can_restrict_members": True,
+        "can_manage_video_chats": True,
+        "can_post_stories": True,
+        "can_edit_stories": True,
+        "can_delete_stories": True,
         "can_invite_users": True,
         "can_promote_members": True,
-        "can_manage_chat": True,
-        "can_manage_topics": True,
     },
 }
+
+PROMOTE_RIGHTS_INFO = (
+    "ℹ️ <b>ADMIN RIGHTS INFORMATION</b>\n\n"
+    "🛡 <b>Normal Admin</b>\n"
+    "• Delete messages\n"
+    "• Pin messages\n"
+    "• Manage live streams\n\n"
+    "⚡ <b>Powerful Admin</b>\n"
+    "• Change group info\n"
+    "• Pin messages\n"
+    "• Edit/manage member tags (where Telegram allows)\n"
+    "• Manage stories\n"
+    "• Ban / restrict users\n"
+    "• Delete messages\n"
+    "• Manage live streams\n\n"
+    "💀 <b>Destructive Admin</b>\n"
+    "• Change group info\n"
+    "• Pin messages\n"
+    "• Edit/manage member tags (where Telegram allows)\n"
+    "• Manage stories\n"
+    "• Ban / restrict users\n"
+    "• Delete messages\n"
+    "• Manage live streams\n"
+    "• Invite users via link\n"
+    "• Add new admins\n\n"
+    "<i>Only the rights that the bot itself has are granted by Telegram.</i>"
+)
 
 async def _promotion_allowed(update):
     """Only an admin with Add New Admins / Promote Members permission may promote."""
@@ -904,13 +937,15 @@ async def promote(update, context):
         [InlineKeyboardButton("🛡 Normal", callback_data=f"pr:normal:{user_id}:{actor_id}")],
         [InlineKeyboardButton("⚡ Powerful", callback_data=f"pr:powerful:{user_id}:{actor_id}")],
         [InlineKeyboardButton("💀 Destructive", callback_data=f"pr:destructive:{user_id}:{actor_id}")],
+        [InlineKeyboardButton("ℹ️ Rights Information", callback_data=f"pr:info:0:{actor_id}")],
     ])
     await update.effective_message.reply_text(
         f"<b>Promote {display}</b>\n"
         f"🏷 Admin Tag: <b>{custom_title or 'No custom tag'}</b>\n\n"
         "🛡 <b>Normal</b> — Delete messages, Pin messages, Manage live streams\n"
-        "⚡ <b>Powerful</b> — All Normal rights + Change group info\n"
-        "💀 <b>Destructive</b> — Powerful rights + Ban/restrict users, Invite/add users, Add new admins and management rights\n\n"
+        "⚡ <b>Powerful</b> — Group info, Pin, Member-tag management, Stories, Ban/restrict, Delete, Live streams\n"
+        "💀 <b>Destructive</b> — Powerful rights + Invite users via link + Add new admins\n\n"
+        "Tap ℹ️ Rights Information to see the full permission list.\n\n"
         "Choose the admin level:",
         parse_mode="HTML", reply_markup=keyboard,
     )
@@ -922,6 +957,15 @@ async def promote_callback(update, context):
         user_id, actor_id = int(raw_user_id), int(raw_actor_id)
     except Exception:
         return await q.answer("Invalid promotion request.", show_alert=True)
+
+    # Rights information is available to every admin who currently has
+    # Telegram's Add New Admins / Promote Members permission.
+    if level == "info":
+        if q.from_user.id != actor_id:
+            return await q.answer("Open /promote yourself to view this menu.", show_alert=True)
+        if not await _promotion_allowed(update):
+            return await q.answer("You need the Add New Admins permission to view this information.", show_alert=True)
+        return await q.answer(PROMOTE_RIGHTS_INFO, show_alert=True)
 
     if q.from_user.id != actor_id:
         return await q.answer("Only the admin who opened this promotion menu can choose the level.", show_alert=True)
