@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from telegram import ChatPermissions
-from database.mongo import add_violation, log_event, get_user, upsert_user
+from database.mongo import add_violation, log_event, get_user, upsert_user, save_mute_record
 from config import LOGGER_CHAT_ID
 from services.risk_engine import calculate, action_for
 from services.threat_engine import record as record_threat
@@ -14,7 +14,9 @@ async def delete_message(message):
 async def mute_user(message, minutes):
     try:
         until=datetime.now(timezone.utc).timestamp()+minutes*60
-        await message.chat.restrict_member(message.from_user.id,ChatPermissions.no_permissions(),until_date=int(until)); return True
+        await message.chat.restrict_member(message.from_user.id, ChatPermissions.no_permissions(), until_date=int(until))
+        await save_mute_record(message.chat.id, message.from_user.id, minutes, 'Automatic moderation restriction')
+        return True
     except Exception:return False
 
 async def punish(message, reason, settings, extra_risk=0):
