@@ -483,8 +483,18 @@ LOCKDOWN_OPTIONS = {
 }
 LOCKDOWN_FIELDS = tuple({v[0] for v in LOCKDOWN_OPTIONS.values()})
 
-def _permission_state(chat, fallback=None):
-    state = _permissions_to_dict(chat.permissions) or {}
+async def _permission_state(chat, bot, fallback=None):
+    """Return current default member permissions safely across PTB versions."""
+    permissions = getattr(chat, "permissions", None)
+    if permissions is None:
+        try:
+            full_chat = await bot.get_chat(chat.id)
+            permissions = getattr(full_chat, "permissions", None)
+        except Exception:
+            permissions = None
+
+    state = _permissions_to_dict(permissions) if permissions is not None else {}
+    state = state or {}
     if fallback:
         for key, value in fallback.items():
             state.setdefault(key, value)
@@ -537,9 +547,9 @@ async def lockdown(update, context):
     settings = await get_group(chat.id, DEFAULT_SETTINGS)
     previous = settings.get("lockdown_previous_permissions")
     if not previous:
-        previous = _permission_state(chat)
+        previous = await _permission_state(chat, context.bot)
         await update_group(chat.id, {"lockdown_previous_permissions": previous})
-    current = dict(settings.get("lockdown_current_permissions") or _permission_state(chat, previous))
+    current = dict(settings.get("lockdown_current_permissions") or await _permission_state(chat, context.bot, previous))
 
     if option == "all":
         for field in LOCKDOWN_FIELDS: current[field] = False
@@ -567,8 +577,8 @@ async def unlockdown(update, context):
     if option in ("help", "list"):
         return await update.effective_message.reply_text(_lockdown_usage(), parse_mode="HTML")
     settings = await get_group(chat.id, DEFAULT_SETTINGS)
-    previous = settings.get("lockdown_previous_permissions") or _permission_state(chat)
-    current = dict(settings.get("lockdown_current_permissions") or _permission_state(chat, previous))
+    previous = settings.get("lockdown_previous_permissions") or await _permission_state(chat, context.bot)
+    current = dict(settings.get("lockdown_current_permissions") or await _permission_state(chat, context.bot, previous))
     if option == "all":
         current = dict(previous)
         active = False
