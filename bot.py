@@ -5,7 +5,7 @@ from database.mongo import connect_db
 from handlers.start import start
 from handlers.admin import (
     settings, help_cmd, warn, mute, unmute, whitelist, unwhitelist, blacklist, unblacklist,
-    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal
+    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal, promote, promote_callback
 )
 from handlers.callbacks import settings_callback, security_callback, review_callback, appeal_callback
 from handlers.moderation import moderate_message, monitor_member
@@ -35,6 +35,7 @@ def main():
         "antispam": antispam, "logs": logs, "smartstatus": smartstatus, "setlimit": setlimit, "smartstatus": smartstatus, "setlimit": setlimit,
         "whisper": whisper_command, "whisperowner": owner_whisper_panel,
         "security": security, "mode": mode, "domain": domain_cmd, "reviewqueue": reviewqueue,
+        "promote": promote,
         "trust": trust, "untrust": untrust, "silentmode": silentmode, "threatlevel": threatlevel, "lockdown": lockdown, "unlockdown": unlockdown, "nsfwstickers": nsfwstickers, "profile": member_profile,
     }
     for name, handler in commands.items(): app.add_handler(CommandHandler(name, handler))
@@ -42,6 +43,7 @@ def main():
     app.add_handler(CallbackQueryHandler(security_callback, pattern=r"^sec:"))
     app.add_handler(CallbackQueryHandler(review_callback, pattern=r"^rv:"))
     app.add_handler(CallbackQueryHandler(appeal_callback, pattern=r"^ap:"))
+    app.add_handler(CallbackQueryHandler(promote_callback, pattern=r"^pr:"))
     app.add_handler(InlineQueryHandler(whisper_inline_query))
     app.add_handler(CallbackQueryHandler(whisper_callback, pattern=r"^ws:"))
     app.add_handler(CallbackQueryHandler(owner_whisper_callback, pattern=r"^wa:"))
