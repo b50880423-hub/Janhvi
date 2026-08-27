@@ -438,18 +438,44 @@ def _permissions_to_dict(permissions):
     return {field: getattr(permissions, field, None) for field in fields
             if getattr(permissions, field, None) is not None}
 
+async def _bot_can_restrict(update):
+    try:
+        me = await update.get_bot().get_me()
+        member = await update.get_bot().get_chat_member(update.effective_chat.id, me.id)
+        return bool(getattr(member, "can_restrict_members", False) or member.status == ChatMemberStatus.OWNER)
+    except Exception:
+        return False
+
 async def lockdown(update, context):
     if not await require_admin(update):
         return await deny(update)
+    if update.effective_chat.type not in ("group", "supergroup"):
+        return await update.effective_message.reply_text("❌ /lockdown can only be used in a group or supergroup.")
+    if not await _bot_can_restrict(update):
+        return await update.effective_message.reply_text("❌ I need the <b>Restrict Members</b> admin permission to use lockdown.", parse_mode="HTML")
 
     chat = update.effective_chat
     settings = await get_group(chat.id, DEFAULT_SETTINGS)
-    if settings.get("lockdown"):
-        return await update.effective_message.reply_text("🔒 Group lockdown is already enabled.")
-
     previous = _permissions_to_dict(chat.permissions)
+    # Explicitly disable every member permission. This is more reliable across PTB versions.
+    locked = ChatPermissions(
+        can_send_messages=False,
+        can_send_audios=False,
+        can_send_documents=False,
+        can_send_photos=False,
+        can_send_videos=False,
+        can_send_video_notes=False,
+        can_send_voice_notes=False,
+        can_send_polls=False,
+        can_send_other_messages=False,
+        can_add_web_page_previews=False,
+        can_change_info=False,
+        can_invite_users=False,
+        can_pin_messages=False,
+        can_manage_topics=False,
+    )
     try:
-        await chat.set_permissions(ChatPermissions.no_permissions())
+        await context.bot.set_chat_permissions(chat_id=chat.id, permissions=locked)
         await update_group(chat.id, {
             "lockdown": True,
             "threat_level": "LOCKDOWN",
@@ -464,38 +490,43 @@ async def lockdown(update, context):
         )
     except Exception as e:
         await update.effective_message.reply_text(
-            f"❌ Could not enable lockdown: {e}\n\nMake sure the bot is an admin with the <b>Restrict Members</b> permission.",
+            f"❌ Could not enable lockdown: <code>{e}</code>\n\nMake sure I am an admin with <b>Restrict Members</b> permission.",
             parse_mode="HTML",
         )
 
 async def unlockdown(update, context):
     if not await require_admin(update):
         return await deny(update)
+    if not await _bot_can_restrict(update):
+        return await update.effective_message.reply_text("❌ I need the <b>Restrict Members</b> admin permission to unlock the group.", parse_mode="HTML")
 
     chat = update.effective_chat
     settings = await get_group(chat.id, DEFAULT_SETTINGS)
-    if not settings.get("lockdown"):
-        return await update.effective_message.reply_text("🔓 Group lockdown is not currently enabled.")
-
-    previous = settings.get("lockdown_previous_permissions")
+    previous = settings.get("lockdown_previous_permissions") or {}
     try:
-        permissions = ChatPermissions(**previous) if previous else ChatPermissions.all_permissions()
-        await chat.set_permissions(permissions)
+        # If old permissions were not saved, restore normal member permissions.
+        if previous:
+            permissions = ChatPermissions(**previous)
+        else:
+            permissions = ChatPermissions(
+                can_send_messages=True, can_send_audios=True, can_send_documents=True,
+                can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
+                can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
+                can_add_web_page_previews=True,
+            )
+        await context.bot.set_chat_permissions(chat_id=chat.id, permissions=permissions)
         await update_group(chat.id, {
             "lockdown": False,
             "threat_level": "SAFE",
             "lockdown_previous_permissions": None,
         })
         await update.effective_message.reply_text(
-            "🟢 <b>GROUP LOCKDOWN DISABLED</b>\n\n"
-            "💬 Normal members can send messages and use the group again.\n"
-            "🔓 The group's previous default permissions have been restored.",
+            "🟢 <b>GROUP LOCKDOWN DISABLED</b>\n\n💬 Normal members can send messages and use the group again.",
             parse_mode="HTML",
         )
     except Exception as e:
         await update.effective_message.reply_text(
-            f"❌ Could not disable lockdown: {e}\n\nMake sure the bot is an admin with the <b>Restrict Members</b> permission.",
-            parse_mode="HTML",
+            f"❌ Could not disable lockdown: <code>{e}</code>", parse_mode="HTML"
         )
 
 async def nsfwstickers(update, context):
@@ -666,15 +697,28 @@ async def resolve_promotion_target(update, context):
     custom_title = " ".join(args[1:]).strip()
     if raw.lstrip("-").isdigit():
         uid = int(raw)
+        # Numeric IDs do not need a database record. Telegram will verify membership
+        # when promotion is attempted.
         doc = await get_user(update.effective_chat.id, uid)
         if doc:
-            name = doc.get("first_name") or doc.get("username") or str(uid)
+            name = doc.get("full_name") or doc.get("first_name") or doc.get("username") or str(uid)
             return uid, f"@{doc['username']}" if doc.get("username") else name, custom_title
         return uid, f"<code>{uid}</code>", custom_title
     if raw.startswith("@"):
         doc = await get_user_by_username(update.effective_chat.id, raw)
         if doc:
             return int(doc["user_id"]), f"@{doc.get('username', raw.lstrip('@'))}", custom_title
+        # Telegram bots cannot globally convert an arbitrary @username into a user ID.
+        # Fall back to matching current administrators, which are available via Bot API.
+        try:
+            admins = await update.get_bot().get_chat_administrators(update.effective_chat.id)
+            wanted = raw.lstrip("@").lower()
+            for member in admins:
+                user = member.user
+                if (user.username or "").lower() == wanted:
+                    return user.id, f"@{user.username}", custom_title
+        except Exception:
+            pass
     return None, None, None
 
 async def promote(update, context):
