@@ -42,6 +42,7 @@ async def help_cmd(update, context):
         "/unlock [type] — unlock a content type\n"
         "/lockdown — stop all normal members from sending anything\n"
         "/unlockdown — restore normal member messaging\n"
+        "/demote — remove an admin\'s admin rights\n"
         "/filter add <word> — add custom filter\n"
         "/filter remove <word> — remove custom filter\n"
         "/filter list — list filters\n\n"
@@ -452,50 +453,43 @@ async def lockdown(update, context):
     chat = update.effective_chat
     if not chat or chat.type not in ("group", "supergroup"):
         return await update.effective_message.reply_text("❌ /lockdown can only be used in a group or supergroup.")
+    if not await _bot_can_restrict(update):
+        return await update.effective_message.reply_text("❌ I need the <b>Restrict Members</b> admin permission to lock the group.", parse_mode="HTML")
+
     previous = _permissions_to_dict(chat.permissions) or {}
-    locked = ChatPermissions(
-        can_send_messages=False,
-        can_send_audios=False,
-        can_send_documents=False,
-        can_send_photos=False,
-        can_send_videos=False,
-        can_send_video_notes=False,
-        can_send_voice_notes=False,
-        can_send_polls=False,
-        can_send_other_messages=False,
-        can_add_web_page_previews=False,
-        can_change_info=False,
-        can_invite_users=False,
-        can_pin_messages=False,
-    )
+    # Telegram's default chat permissions apply only to normal members. Administrators
+    # keep their own rights, so setting can_send_messages=False is a true group lockdown.
+    locked = ChatPermissions(can_send_messages=False)
     try:
         await context.bot.set_chat_permissions(chat_id=chat.id, permissions=locked)
         await update_group(chat.id, {"lockdown": True, "threat_level": "LOCKDOWN", "lockdown_previous_permissions": previous})
-        await update.effective_message.reply_text("🔒 <b>GROUP LOCKDOWN ENABLED</b>\n\nNormal members cannot send messages, stickers, media, links, polls, or other content. Admins are not affected.\n\nUse /unlockdown to restore member permissions.", parse_mode="HTML")
+        await update.effective_message.reply_text(
+            "🔒 <b>GROUP LOCKDOWN ENABLED</b>\n\n"
+            "Normal members cannot send messages, stickers, media, links, polls, or anything else. "
+            "Group admins are not affected.\n\nUse /unlockdown to restore the group.",
+            parse_mode="HTML",
+        )
     except Exception as e:
-        await update.effective_message.reply_text(f"❌ Lockdown failed: <code>{e}</code>\n\nThe bot must be an administrator with <b>Restrict Members</b> permission.", parse_mode="HTML")
+        await update.effective_message.reply_text(f"❌ Lockdown failed: <code>{e}</code>", parse_mode="HTML")
 
 async def unlockdown(update, context):
     if not await require_admin(update):
         return await deny(update)
     chat = update.effective_chat
+    if not await _bot_can_restrict(update):
+        return await update.effective_message.reply_text("❌ I need the <b>Restrict Members</b> admin permission to unlock the group.", parse_mode="HTML")
     settings = await get_group(chat.id, DEFAULT_SETTINGS)
     previous = settings.get("lockdown_previous_permissions") or {}
     try:
         if previous:
-            permissions = ChatPermissions(**{k:v for k,v in previous.items() if v is not None})
+            permissions = ChatPermissions(**previous)
         else:
-            permissions = ChatPermissions(
-                can_send_messages=True, can_send_audios=True, can_send_documents=True,
-                can_send_photos=True, can_send_videos=True, can_send_video_notes=True,
-                can_send_voice_notes=True, can_send_polls=True, can_send_other_messages=True,
-                can_add_web_page_previews=True,
-            )
+            permissions = ChatPermissions.all_permissions()
         await context.bot.set_chat_permissions(chat_id=chat.id, permissions=permissions)
         await update_group(chat.id, {"lockdown": False, "threat_level": "SAFE", "lockdown_previous_permissions": None})
         await update.effective_message.reply_text("🔓 <b>GROUP LOCKDOWN DISABLED</b>\n\nNormal members can send messages again.", parse_mode="HTML")
     except Exception as e:
-        await update.effective_message.reply_text(f"❌ Unlock failed: <code>{e}</code>\n\nThe bot must have <b>Restrict Members</b> permission.", parse_mode="HTML")
+        await update.effective_message.reply_text(f"❌ Unlock failed: <code>{e}</code>", parse_mode="HTML")
 
 async def nsfwstickers(update, context):
     if not await require_admin(update): return await deny(update)
@@ -777,3 +771,59 @@ async def promote_callback(update, context):
     except Exception as e:
         await q.answer("Promotion failed.", show_alert=True)
         await q.edit_message_text(f"❌ <b>Could not promote this member.</b>\n<code>{e}</code>", parse_mode="HTML")
+
+
+# -------------------------
+# Admin demotion system
+# -------------------------
+async def demote(update, context):
+    """Remove an administrator's listed admin rights and return them to normal-member status."""
+    if not await _promotion_allowed(update):
+        return await update.effective_message.reply_text(
+            "❌ Only admins with the <b>Add New Admins</b> permission can use /demote.", parse_mode="HTML"
+        )
+    if not await _bot_can_promote(update):
+        return await update.effective_message.reply_text(
+            "❌ I need the <b>Add New Admins / Promote Members</b> permission first.", parse_mode="HTML"
+        )
+
+    user_id, display, _ = await resolve_promotion_target(update, context)
+    if not user_id:
+        return await update.effective_message.reply_text(
+            "Usage:\n• Reply to an admin: <code>/demote</code>\n"
+            "• <code>/demote @username</code>\n• <code>/demote user_id</code>", parse_mode="HTML"
+        )
+    try:
+        target = await context.bot.get_chat_member(update.effective_chat.id, user_id)
+        if target.status == ChatMemberStatus.OWNER:
+            return await update.effective_message.reply_text("❌ The group owner cannot be demoted.")
+        if target.status != ChatMemberStatus.ADMINISTRATOR:
+            return await update.effective_message.reply_text("❌ That user is not currently an administrator.")
+
+        # Explicitly remove every requested/admin-management right. Telegram also
+        # clears the administrator custom title when the user is demoted.
+        await update.effective_chat.promote_member(
+            user_id=user_id,
+            can_manage_chat=False,
+            can_change_info=False,
+            can_delete_messages=False,
+            can_restrict_members=False,
+            can_invite_users=False,
+            can_pin_messages=False,
+            can_promote_members=False,
+            can_manage_video_chats=False,
+            can_manage_topics=False,
+            can_post_stories=False,
+            can_edit_stories=False,
+            can_delete_stories=False,
+        )
+        try:
+            await update.effective_chat.set_administrator_custom_title(user_id=user_id, custom_title="")
+        except Exception:
+            pass
+        await update.effective_message.reply_text(
+            f"⬇️ <b>Demoted successfully.</b>\n\n{display or f'<code>{user_id}</code>'} is now a normal member.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ Could not demote this admin: <code>{e}</code>", parse_mode="HTML")
