@@ -449,15 +449,10 @@ async def _bot_can_restrict(update):
 async def lockdown(update, context):
     if not await require_admin(update):
         return await deny(update)
-    if update.effective_chat.type not in ("group", "supergroup"):
-        return await update.effective_message.reply_text("❌ /lockdown can only be used in a group or supergroup.")
-    if not await _bot_can_restrict(update):
-        return await update.effective_message.reply_text("❌ I need the <b>Restrict Members</b> admin permission to use lockdown.", parse_mode="HTML")
-
     chat = update.effective_chat
-    settings = await get_group(chat.id, DEFAULT_SETTINGS)
-    previous = _permissions_to_dict(chat.permissions)
-    # Explicitly disable every member permission. This is more reliable across PTB versions.
+    if not chat or chat.type not in ("group", "supergroup"):
+        return await update.effective_message.reply_text("❌ /lockdown can only be used in a group or supergroup.")
+    previous = _permissions_to_dict(chat.permissions) or {}
     locked = ChatPermissions(
         can_send_messages=False,
         can_send_audios=False,
@@ -472,41 +467,23 @@ async def lockdown(update, context):
         can_change_info=False,
         can_invite_users=False,
         can_pin_messages=False,
-        can_manage_topics=False,
     )
     try:
         await context.bot.set_chat_permissions(chat_id=chat.id, permissions=locked)
-        await update_group(chat.id, {
-            "lockdown": True,
-            "threat_level": "LOCKDOWN",
-            "lockdown_previous_permissions": previous,
-        })
-        await update.effective_message.reply_text(
-            "🚨 <b>GROUP LOCKDOWN ENABLED</b>\n\n"
-            "🔒 All normal members are now restricted from sending messages, stickers, media, links, polls, or other content.\n"
-            "🛡️ Group administrators can continue using the group normally.\n\n"
-            "Use /unlockdown to allow members to message again.",
-            parse_mode="HTML",
-        )
+        await update_group(chat.id, {"lockdown": True, "threat_level": "LOCKDOWN", "lockdown_previous_permissions": previous})
+        await update.effective_message.reply_text("🔒 <b>GROUP LOCKDOWN ENABLED</b>\n\nNormal members cannot send messages, stickers, media, links, polls, or other content. Admins are not affected.\n\nUse /unlockdown to restore member permissions.", parse_mode="HTML")
     except Exception as e:
-        await update.effective_message.reply_text(
-            f"❌ Could not enable lockdown: <code>{e}</code>\n\nMake sure I am an admin with <b>Restrict Members</b> permission.",
-            parse_mode="HTML",
-        )
+        await update.effective_message.reply_text(f"❌ Lockdown failed: <code>{e}</code>\n\nThe bot must be an administrator with <b>Restrict Members</b> permission.", parse_mode="HTML")
 
 async def unlockdown(update, context):
     if not await require_admin(update):
         return await deny(update)
-    if not await _bot_can_restrict(update):
-        return await update.effective_message.reply_text("❌ I need the <b>Restrict Members</b> admin permission to unlock the group.", parse_mode="HTML")
-
     chat = update.effective_chat
     settings = await get_group(chat.id, DEFAULT_SETTINGS)
     previous = settings.get("lockdown_previous_permissions") or {}
     try:
-        # If old permissions were not saved, restore normal member permissions.
         if previous:
-            permissions = ChatPermissions(**previous)
+            permissions = ChatPermissions(**{k:v for k,v in previous.items() if v is not None})
         else:
             permissions = ChatPermissions(
                 can_send_messages=True, can_send_audios=True, can_send_documents=True,
@@ -515,19 +492,10 @@ async def unlockdown(update, context):
                 can_add_web_page_previews=True,
             )
         await context.bot.set_chat_permissions(chat_id=chat.id, permissions=permissions)
-        await update_group(chat.id, {
-            "lockdown": False,
-            "threat_level": "SAFE",
-            "lockdown_previous_permissions": None,
-        })
-        await update.effective_message.reply_text(
-            "🟢 <b>GROUP LOCKDOWN DISABLED</b>\n\n💬 Normal members can send messages and use the group again.",
-            parse_mode="HTML",
-        )
+        await update_group(chat.id, {"lockdown": False, "threat_level": "SAFE", "lockdown_previous_permissions": None})
+        await update.effective_message.reply_text("🔓 <b>GROUP LOCKDOWN DISABLED</b>\n\nNormal members can send messages again.", parse_mode="HTML")
     except Exception as e:
-        await update.effective_message.reply_text(
-            f"❌ Could not disable lockdown: <code>{e}</code>", parse_mode="HTML"
-        )
+        await update.effective_message.reply_text(f"❌ Unlock failed: <code>{e}</code>\n\nThe bot must have <b>Restrict Members</b> permission.", parse_mode="HTML")
 
 async def nsfwstickers(update, context):
     if not await require_admin(update): return await deny(update)
@@ -681,9 +649,23 @@ async def _bot_can_promote(update):
     try:
         me = await update.get_bot().get_me()
         member = await update.get_bot().get_chat_member(update.effective_chat.id, me.id)
-        return bool(getattr(member, "can_promote_members", False))
+        return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER) and bool(getattr(member, "can_promote_members", False))
     except Exception:
         return False
+
+async def _safe_promote_rights(update, requested):
+    """Telegram only lets a bot grant rights it already has. Clamp the preset to the bot's own rights."""
+    me = await update.get_bot().get_me()
+    bot_member = await update.get_bot().get_chat_member(update.effective_chat.id, me.id)
+    result = {}
+    for key, value in requested.items():
+        if key == "title":
+            continue
+        if value:
+            result[key] = bool(getattr(bot_member, key, False))
+        else:
+            result[key] = False
+    return result
 
 async def resolve_promotion_target(update, context):
     u = replied_user(update)
@@ -777,7 +759,8 @@ async def promote_callback(update, context):
 
     try:
         await q.answer("Promoting member…")
-        await update.effective_chat.promote_member(user_id=user_id, **{k: v for k, v in rights.items() if k != "title"})
+        safe_rights = await _safe_promote_rights(update, rights)
+        await update.effective_chat.promote_member(user_id=user_id, **safe_rights)
         # Use the tag supplied in /promote, not the permission-level name.
         if custom_title:
             try:
