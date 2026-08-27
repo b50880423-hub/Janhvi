@@ -5,7 +5,7 @@ from database.mongo import connect_db
 from handlers.start import start
 from handlers.admin import (
     settings, help_cmd, warn, mute, unmute, whitelist, unwhitelist, blacklist, unblacklist,
-    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal, promote, promote_callback
+    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal, promote, promote_callback, demote
 )
 from handlers.callbacks import settings_callback, security_callback, review_callback, appeal_callback
 from handlers.moderation import moderate_message, monitor_member
@@ -35,7 +35,7 @@ def main():
         "antispam": antispam, "logs": logs, "smartstatus": smartstatus, "setlimit": setlimit, "smartstatus": smartstatus, "setlimit": setlimit,
         "whisper": whisper_command, "whisperowner": owner_whisper_panel,
         "security": security, "mode": mode, "domain": domain_cmd, "reviewqueue": reviewqueue,
-        "promote": promote,
+        "promote": promote, "demote": demote,
         "trust": trust, "untrust": untrust, "silentmode": silentmode, "threatlevel": threatlevel, "lockdown": lockdown, "unlockdown": unlockdown, "nsfwstickers": nsfwstickers, "profile": member_profile,
     }
     for name, handler in commands.items(): app.add_handler(CommandHandler(name, handler))
