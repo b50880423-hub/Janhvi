@@ -447,47 +447,144 @@ async def _bot_can_restrict(update):
     except Exception:
         return False
 
+LOCKDOWN_OPTIONS = {
+    "text": ("can_send_messages", "💬 Send text messages"),
+    "messages": ("can_send_messages", "💬 Send text messages"),
+    "photo": ("can_send_photos", "🖼 Photos"),
+    "photos": ("can_send_photos", "🖼 Photos"),
+    "video": ("can_send_videos", "🎬 Videos"),
+    "videos": ("can_send_videos", "🎬 Videos"),
+    "sticker": ("can_send_other_messages", "🎭 Stickers"),
+    "stickers": ("can_send_other_messages", "🎭 Stickers"),
+    "gif": ("can_send_other_messages", "🎞 GIFs"),
+    "gifs": ("can_send_other_messages", "🎞 GIFs"),
+    "music": ("can_send_audios", "🎵 Music / audio"),
+    "audio": ("can_send_audios", "🎵 Music / audio"),
+    "file": ("can_send_documents", "📁 Files / documents"),
+    "files": ("can_send_documents", "📁 Files / documents"),
+    "document": ("can_send_documents", "📁 Files / documents"),
+    "documents": ("can_send_documents", "📁 Files / documents"),
+    "voice": ("can_send_voice_notes", "🎙 Voice messages"),
+    "voicemessages": ("can_send_voice_notes", "🎙 Voice messages"),
+    "video_message": ("can_send_video_notes", "📹 Video messages"),
+    "videomessage": ("can_send_video_notes", "📹 Video messages"),
+    "videomessages": ("can_send_video_notes", "📹 Video messages"),
+    "link": ("can_add_web_page_previews", "🔗 Embed links / previews"),
+    "links": ("can_add_web_page_previews", "🔗 Embed links / previews"),
+    "embedlinks": ("can_add_web_page_previews", "🔗 Embed links / previews"),
+    "poll": ("can_send_polls", "📊 Polls"),
+    "polls": ("can_send_polls", "📊 Polls"),
+    "addusers": ("can_invite_users", "👥 Add users"),
+    "invite": ("can_invite_users", "👥 Add users"),
+    "pin": ("can_pin_messages", "📌 Pin messages"),
+    "pinmessages": ("can_pin_messages", "📌 Pin messages"),
+    "chatinfo": ("can_change_info", "✏️ Change chat info"),
+    "changeinfo": ("can_change_info", "✏️ Change chat info"),
+}
+LOCKDOWN_FIELDS = tuple({v[0] for v in LOCKDOWN_OPTIONS.values()})
+
+def _permission_state(chat, fallback=None):
+    state = _permissions_to_dict(chat.permissions) or {}
+    if fallback:
+        for key, value in fallback.items():
+            state.setdefault(key, value)
+    return {field: bool(state.get(field, True)) for field in LOCKDOWN_FIELDS}
+
+def _make_permissions(state):
+    # Explicitly provide all supported default-member permissions.
+    return ChatPermissions(**{field: bool(state.get(field, True)) for field in LOCKDOWN_FIELDS})
+
+def _lockdown_usage():
+    return (
+        "<b>Usage</b>\n"
+        "<code>/lockdown all</code> — disable everything\n"
+        "<code>/lockdown text</code> — disable only text messages\n"
+        "<code>/lockdown photos</code>, <code>videos</code>, <code>stickers</code>, <code>gifs</code>\n"
+        "<code>/lockdown music</code>, <code>files</code>, <code>voice</code>, <code>videomessages</code>\n"
+        "<code>/lockdown links</code>, <code>polls</code>, <code>addusers</code>, <code>pin</code>, <code>chatinfo</code>\n\n"
+        "Use <code>/unlockdown all</code> or the same single option to enable it again.\n\n"
+        "<i>Note: Telegram does not provide a default-member permission to separately disable reactions or 'edit own tags'. Those are controlled by Telegram/group settings and cannot be toggled through ChatPermissions.</i>"
+    )
+
+async def _bot_can_restrict(update):
+    try:
+        me = await update.get_bot().get_me()
+        member = await update.get_bot().get_chat_member(update.effective_chat.id, me.id)
+        return bool(getattr(member, "can_restrict_members", False) or member.status == ChatMemberStatus.OWNER)
+    except Exception:
+        return False
+
+async def _apply_lockdown_state(update, context, state, active):
+    chat = update.effective_chat
+    await context.bot.set_chat_permissions(chat_id=chat.id, permissions=_make_permissions(state))
+    await update_group(chat.id, {
+        "lockdown": active,
+        "threat_level": "LOCKDOWN" if active else "SAFE",
+        "lockdown_current_permissions": state,
+    })
+
 async def lockdown(update, context):
-    if not await require_admin(update):
-        return await deny(update)
+    if not await require_admin(update): return await deny(update)
     chat = update.effective_chat
     if not chat or chat.type not in ("group", "supergroup"):
         return await update.effective_message.reply_text("❌ /lockdown can only be used in a group or supergroup.")
     if not await _bot_can_restrict(update):
-        return await update.effective_message.reply_text("❌ I need the <b>Restrict Members</b> admin permission to lock the group.", parse_mode="HTML")
+        return await update.effective_message.reply_text("❌ I need the <b>Ban Users</b> admin right to restrict normal members and use lockdown.", parse_mode="HTML")
 
-    previous = _permissions_to_dict(chat.permissions) or {}
-    # Telegram's default chat permissions apply only to normal members. Administrators
-    # keep their own rights, so setting can_send_messages=False is a true group lockdown.
-    locked = ChatPermissions(can_send_messages=False)
+    option = (context.args[0].lower().replace("-", "").replace("_", "") if context.args else "all")
+    if option in ("help", "list"):
+        return await update.effective_message.reply_text(_lockdown_usage(), parse_mode="HTML")
+    settings = await get_group(chat.id, DEFAULT_SETTINGS)
+    previous = settings.get("lockdown_previous_permissions")
+    if not previous:
+        previous = _permission_state(chat)
+        await update_group(chat.id, {"lockdown_previous_permissions": previous})
+    current = dict(settings.get("lockdown_current_permissions") or _permission_state(chat, previous))
+
+    if option == "all":
+        for field in LOCKDOWN_FIELDS: current[field] = False
+        label = "ALL MEMBER PERMISSIONS"
+    elif option in LOCKDOWN_OPTIONS:
+        field, label = LOCKDOWN_OPTIONS[option]
+        current[field] = False
+    else:
+        return await update.effective_message.reply_text(_lockdown_usage(), parse_mode="HTML")
     try:
-        await context.bot.set_chat_permissions(chat_id=chat.id, permissions=locked)
-        await update_group(chat.id, {"lockdown": True, "threat_level": "LOCKDOWN", "lockdown_previous_permissions": previous})
+        await _apply_lockdown_state(update, context, current, True)
         await update.effective_message.reply_text(
-            "🔒 <b>GROUP LOCKDOWN ENABLED</b>\n\n"
-            "Normal members cannot send messages, stickers, media, links, polls, or anything else. "
-            "Group admins are not affected.\n\nUse /unlockdown to restore the group.",
-            parse_mode="HTML",
-        )
+            f"🔒 <b>LOCKDOWN UPDATED</b>\n\n🚫 Disabled: <b>{label}</b>\n🛡 Group admins are not affected.", parse_mode="HTML")
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Lockdown failed: <code>{e}</code>", parse_mode="HTML")
 
 async def unlockdown(update, context):
-    if not await require_admin(update):
-        return await deny(update)
+    if not await require_admin(update): return await deny(update)
     chat = update.effective_chat
+    if not chat or chat.type not in ("group", "supergroup"):
+        return await update.effective_message.reply_text("❌ /unlockdown can only be used in a group or supergroup.")
     if not await _bot_can_restrict(update):
-        return await update.effective_message.reply_text("❌ I need the <b>Restrict Members</b> admin permission to unlock the group.", parse_mode="HTML")
+        return await update.effective_message.reply_text("❌ I need the <b>Ban Users</b> admin right to change normal member permissions.", parse_mode="HTML")
+    option = (context.args[0].lower().replace("-", "").replace("_", "") if context.args else "all")
+    if option in ("help", "list"):
+        return await update.effective_message.reply_text(_lockdown_usage(), parse_mode="HTML")
     settings = await get_group(chat.id, DEFAULT_SETTINGS)
-    previous = settings.get("lockdown_previous_permissions") or {}
+    previous = settings.get("lockdown_previous_permissions") or _permission_state(chat)
+    current = dict(settings.get("lockdown_current_permissions") or _permission_state(chat, previous))
+    if option == "all":
+        current = dict(previous)
+        active = False
+        label = "ALL SAVED MEMBER PERMISSIONS"
+    elif option in LOCKDOWN_OPTIONS:
+        field, label = LOCKDOWN_OPTIONS[option]
+        current[field] = True
+        active = any(not bool(current.get(f, True)) for f in LOCKDOWN_FIELDS)
+    else:
+        return await update.effective_message.reply_text(_lockdown_usage(), parse_mode="HTML")
     try:
-        if previous:
-            permissions = ChatPermissions(**previous)
-        else:
-            permissions = ChatPermissions.all_permissions()
-        await context.bot.set_chat_permissions(chat_id=chat.id, permissions=permissions)
-        await update_group(chat.id, {"lockdown": False, "threat_level": "SAFE", "lockdown_previous_permissions": None})
-        await update.effective_message.reply_text("🔓 <b>GROUP LOCKDOWN DISABLED</b>\n\nNormal members can send messages again.", parse_mode="HTML")
+        await _apply_lockdown_state(update, context, current, active)
+        if option == "all":
+            await update_group(chat.id, {"lockdown_previous_permissions": None})
+        await update.effective_message.reply_text(
+            f"🔓 <b>LOCKDOWN UPDATED</b>\n\n✅ Enabled: <b>{label}</b>\n🛡 Group admins are not affected.", parse_mode="HTML")
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Unlock failed: <code>{e}</code>", parse_mode="HTML")
 
@@ -575,28 +672,107 @@ async def reviewqueue(update, context):
 
 
 async def appeal(update, context):
-    # This command is designed for the bot's private chat.
+    """Interactive private-chat appeal flow."""
     if update.effective_chat.type != "private":
-        return await update.effective_message.reply_text("Please send your appeal to me in private chat. Open the bot and use /appeal <your explanation>.")
-    if not context.args:
-        return await update.effective_message.reply_text("Usage: /appeal <explain why you think the mute should be removed>")
-    user_id=update.effective_user.id
-    text=" ".join(context.args).strip()[:1500]
+        return await update.effective_message.reply_text(
+            "⚖️ Please open my private chat and use /appeal there."
+        )
+    user_id = update.effective_user.id
     from database.mongo import db
-    rec=await db.mute_records.find_one({"user_id":user_id},sort=[("muted_at",-1)])
+    rec = await db.mute_records.find_one({"user_id": user_id}, sort=[("muted_at", -1)])
     if not rec:
-        return await update.effective_message.reply_text("I couldn't find a recent mute record for you. Please contact a group admin.")
-    chat_id=int(rec['chat_id'])
-    appeal_doc=await create_appeal(chat_id,user_id,text)
-    from bson import ObjectId
-    aid=str(appeal_doc['_id'])
-    buttons=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Unmute",callback_data=f"ap:unmute:{aid}"),InlineKeyboardButton("⏳ Reduce",callback_data=f"ap:reduce:{aid}")],[InlineKeyboardButton("❌ Reject",callback_data=f"ap:reject:{aid}"),InlineKeyboardButton("⭐ Trust",callback_data=f"ap:trust:{aid}")]])
-    username=(update.effective_user.username and '@'+update.effective_user.username) or update.effective_user.full_name
+        return await update.effective_message.reply_text(
+            "⚠️ I couldn't find a recent mute or restriction record for you. Please contact a group admin."
+        )
+
+    # Keep compatibility with the old one-line command: /appeal reason...
+    if context.args:
+        text = " ".join(context.args).strip()[:1500]
+        return await _submit_appeal(update, context, rec, text)
+
+    context.user_data["appeal_record"] = {
+        "chat_id": int(rec["chat_id"]),
+        "reason": rec.get("reason", "No reason recorded"),
+    }
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✍️ Write Appeal", callback_data="appealflow:write")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="appealflow:cancel")],
+    ])
+    await update.effective_message.reply_text(
+        "⚖️ <b>APPEAL CENTER</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "🚫 A moderation restriction was found on your account.\n\n"
+        "📝 If you believe the action was unfair, or you want another chance, you can submit an appeal for the group admins to review.\n\n"
+        "Please be honest and respectful. 💙",
+        parse_mode="HTML", reply_markup=keyboard,
+    )
+
+async def appeal_flow_callback(update, context):
+    q = update.callback_query
+    await q.answer()
+    if not q.message or q.message.chat.type != "private":
+        return await q.answer("Please use the bot's private chat.", show_alert=True)
+    action = q.data.split(":", 1)[1] if ":" in q.data else ""
+    if action == "cancel":
+        context.user_data.pop("appeal_record", None)
+        return await q.edit_message_text("❌ <b>Appeal cancelled.</b>\nYou can start again anytime with /appeal.", parse_mode="HTML")
+    if action == "write":
+        context.user_data["awaiting_appeal_reason"] = True
+        return await q.edit_message_text(
+            "✍️ <b>WHY SHOULD YOUR RESTRICTION BE REMOVED?</b>\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            "Please send your reason in <b>one message</b>.\n\n"
+            "💡 Example: <i>I am sorry for what I did. It will not happen again. Please give me another chance.</i>",
+            parse_mode="HTML",
+        )
+
+async def appeal_reason_message(update, context):
+    if update.effective_chat.type != "private" or not context.user_data.get("awaiting_appeal_reason"):
+        return
+    if not update.effective_message or not update.effective_message.text or update.effective_message.text.startswith("/"):
+        return await update.effective_message.reply_text("📝 Please send your appeal reason as normal text.")
+    from database.mongo import db
+    user_id = update.effective_user.id
+    rec = await db.mute_records.find_one({"user_id": user_id}, sort=[("muted_at", -1)])
+    if not rec:
+        context.user_data.pop("awaiting_appeal_reason", None)
+        return await update.effective_message.reply_text("⚠️ Your moderation record could no longer be found. Please contact a group admin.")
+    context.user_data.pop("awaiting_appeal_reason", None)
+    context.user_data.pop("appeal_record", None)
+    text = update.effective_message.text.strip()[:1500]
+    await _submit_appeal(update, context, rec, text)
+
+async def _submit_appeal(update, context, rec, text):
+    user_id = update.effective_user.id
+    chat_id = int(rec["chat_id"])
+    appeal_doc = await create_appeal(chat_id, user_id, text)
+    aid = str(appeal_doc["_id"])
+    buttons = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Accept & Unmute", callback_data=f"ap:unmute:{aid}")],
+        [InlineKeyboardButton("❌ Reject", callback_data=f"ap:reject:{aid}")],
+        [InlineKeyboardButton("⭐ Trust & Unmute", callback_data=f"ap:trust:{aid}")],
+    ])
+    username = (update.effective_user.username and "@" + update.effective_user.username) or update.effective_user.full_name
+    message = (
+        "⚖️ <b>NEW APPEAL RECEIVED</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        f"👤 <b>User:</b> {username}\n"
+        f"🆔 <b>User ID:</b> <code>{user_id}</code>\n"
+        f"🚫 <b>Restriction Reason:</b> {rec.get('reason', 'Unknown')}\n\n"
+        "📝 <b>USER'S APPEAL:</b>\n"
+        f"<blockquote>{text}</blockquote>\n\n"
+        "👇 <i>Choose an action below.</i>"
+    )
     try:
-        await context.bot.send_message(chat_id, f"📩 <b>NEW MUTE APPEAL</b>\n\n👤 User: {username}\n🆔 ID: <code>{user_id}</code>\n🔇 Reason: {rec.get('reason','Unknown')}\n📝 Appeal: {text}", parse_mode='HTML', reply_markup=buttons)
+        await context.bot.send_message(chat_id, message, parse_mode="HTML", reply_markup=buttons)
     except Exception:
-        return await update.effective_message.reply_text("Your appeal could not be delivered to the group admins. Please make sure the bot is still in the group.")
-    await update.effective_message.reply_text("✅ Your appeal has been sent to the group admins. Please wait for their decision.")
+        return await update.effective_message.reply_text("❌ Your appeal could not be delivered to the group admins. Please contact an admin.")
+    await update.effective_message.reply_text(
+        "📨 <b>APPEAL SUBMITTED SUCCESSFULLY!</b>\n"
+        "━━━━━━━━━━━━━━━━\n\n"
+        "Your request has been sent to the group administrators. Please wait patiently for their decision. 💙",
+        parse_mode="HTML",
+    )
 
 # -------------------------
 # Admin promotion system
