@@ -40,6 +40,8 @@ async def help_cmd(update, context):
         "/antispam — show/toggle protection\n"
         "/lock [type] — lock a content type\n"
         "/unlock [type] — unlock a content type\n"
+        "/lockdown — stop all normal members from sending anything\n"
+        "/unlockdown — restore normal member messaging\n"
         "/filter add <word> — add custom filter\n"
         "/filter remove <word> — remove custom filter\n"
         "/filter list — list filters\n\n"
@@ -422,15 +424,79 @@ async def threatlevel(update, context):
     await update_group(update.effective_chat.id,{"threat_level":level})
     await update.effective_message.reply_text(f"🚨 <b>Threat Level: {level}</b>\nRecent moderation risk: <b>{risk}</b>\nLockdown: <b>{'ON' if s.get('lockdown') else 'OFF'}</b>",parse_mode="HTML")
 
+def _permissions_to_dict(permissions):
+    """Store Telegram chat default permissions so they can be restored."""
+    if not permissions:
+        return None
+    fields = (
+        "can_send_messages", "can_send_audios", "can_send_documents",
+        "can_send_photos", "can_send_videos", "can_send_video_notes",
+        "can_send_voice_notes", "can_send_polls", "can_send_other_messages",
+        "can_add_web_page_previews", "can_change_info", "can_invite_users",
+        "can_pin_messages", "can_manage_topics",
+    )
+    return {field: getattr(permissions, field, None) for field in fields
+            if getattr(permissions, field, None) is not None}
+
 async def lockdown(update, context):
-    if not await require_admin(update): return await deny(update)
-    await update_group(update.effective_chat.id,{"lockdown":True,"threat_level":"LOCKDOWN"})
-    await update.effective_message.reply_text("🚨 Lockdown enabled. New/low-history members posting links or stickers are protected more strictly.")
+    if not await require_admin(update):
+        return await deny(update)
+
+    chat = update.effective_chat
+    settings = await get_group(chat.id, DEFAULT_SETTINGS)
+    if settings.get("lockdown"):
+        return await update.effective_message.reply_text("🔒 Group lockdown is already enabled.")
+
+    previous = _permissions_to_dict(chat.permissions)
+    try:
+        await chat.set_permissions(ChatPermissions.no_permissions())
+        await update_group(chat.id, {
+            "lockdown": True,
+            "threat_level": "LOCKDOWN",
+            "lockdown_previous_permissions": previous,
+        })
+        await update.effective_message.reply_text(
+            "🚨 <b>GROUP LOCKDOWN ENABLED</b>\n\n"
+            "🔒 All normal members are now restricted from sending messages, stickers, media, links, polls, or other content.\n"
+            "🛡️ Group administrators can continue using the group normally.\n\n"
+            "Use /unlockdown to allow members to message again.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await update.effective_message.reply_text(
+            f"❌ Could not enable lockdown: {e}\n\nMake sure the bot is an admin with the <b>Restrict Members</b> permission.",
+            parse_mode="HTML",
+        )
 
 async def unlockdown(update, context):
-    if not await require_admin(update): return await deny(update)
-    await update_group(update.effective_chat.id,{"lockdown":False,"threat_level":"SAFE"})
-    await update.effective_message.reply_text("🟢 Lockdown disabled. Adaptive moderation restored.")
+    if not await require_admin(update):
+        return await deny(update)
+
+    chat = update.effective_chat
+    settings = await get_group(chat.id, DEFAULT_SETTINGS)
+    if not settings.get("lockdown"):
+        return await update.effective_message.reply_text("🔓 Group lockdown is not currently enabled.")
+
+    previous = settings.get("lockdown_previous_permissions")
+    try:
+        permissions = ChatPermissions(**previous) if previous else ChatPermissions.all_permissions()
+        await chat.set_permissions(permissions)
+        await update_group(chat.id, {
+            "lockdown": False,
+            "threat_level": "SAFE",
+            "lockdown_previous_permissions": None,
+        })
+        await update.effective_message.reply_text(
+            "🟢 <b>GROUP LOCKDOWN DISABLED</b>\n\n"
+            "💬 Normal members can send messages and use the group again.\n"
+            "🔓 The group's previous default permissions have been restored.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await update.effective_message.reply_text(
+            f"❌ Could not disable lockdown: {e}\n\nMake sure the bot is an admin with the <b>Restrict Members</b> permission.",
+            parse_mode="HTML",
+        )
 
 async def nsfwstickers(update, context):
     if not await require_admin(update): return await deny(update)
@@ -538,3 +604,149 @@ async def appeal(update, context):
     except Exception:
         return await update.effective_message.reply_text("Your appeal could not be delivered to the group admins. Please make sure the bot is still in the group.")
     await update.effective_message.reply_text("✅ Your appeal has been sent to the group admins. Please wait for their decision.")
+
+# -------------------------
+# Admin promotion system
+# -------------------------
+PROMOTE_LEVELS = {
+    "normal": {
+        "title": "Normal Admin",
+        "can_delete_messages": True,
+        "can_pin_messages": True,
+        "can_manage_video_chats": True,
+    },
+    "powerful": {
+        "title": "Powerful Admin",
+        "can_delete_messages": True,
+        "can_pin_messages": True,
+        "can_manage_video_chats": True,
+        "can_change_info": True,
+    },
+    "destructive": {
+        "title": "Destructive Admin",
+        "can_delete_messages": True,
+        "can_pin_messages": True,
+        "can_manage_video_chats": True,
+        "can_change_info": True,
+        "can_restrict_members": True,
+        "can_invite_users": True,
+        "can_promote_members": True,
+        "can_manage_chat": True,
+        "can_manage_topics": True,
+    },
+}
+
+async def _promotion_allowed(update):
+    """Only an admin with Add New Admins / Promote Members permission may promote."""
+    if not update.effective_chat or not update.effective_user:
+        return False
+    try:
+        member = await update.get_bot().get_chat_member(update.effective_chat.id, update.effective_user.id)
+        return bool(getattr(member, "can_promote_members", False) or member.status == ChatMemberStatus.OWNER)
+    except Exception:
+        return False
+
+async def _bot_can_promote(update):
+    try:
+        me = await update.get_bot().get_me()
+        member = await update.get_bot().get_chat_member(update.effective_chat.id, me.id)
+        return bool(getattr(member, "can_promote_members", False))
+    except Exception:
+        return False
+
+async def resolve_promotion_target(update, context):
+    u = replied_user(update)
+    args = list(context.args)
+    if u:
+        # Reply usage: /promote Custom Admin Tag
+        return u.id, u.mention_html(), " ".join(args).strip()
+    if not args:
+        return None, None, None
+    raw = args[0].strip()
+    custom_title = " ".join(args[1:]).strip()
+    if raw.lstrip("-").isdigit():
+        uid = int(raw)
+        doc = await get_user(update.effective_chat.id, uid)
+        if doc:
+            name = doc.get("first_name") or doc.get("username") or str(uid)
+            return uid, f"@{doc['username']}" if doc.get("username") else name, custom_title
+        return uid, f"<code>{uid}</code>", custom_title
+    if raw.startswith("@"):
+        doc = await get_user_by_username(update.effective_chat.id, raw)
+        if doc:
+            return int(doc["user_id"]), f"@{doc.get('username', raw.lstrip('@'))}", custom_title
+    return None, None, None
+
+async def promote(update, context):
+    if not await _promotion_allowed(update):
+        return await update.effective_message.reply_text("❌ Only admins with the <b>Add New Admins</b> permission can use /promote.", parse_mode="HTML")
+    if not await _bot_can_promote(update):
+        return await update.effective_message.reply_text("❌ I need the <b>Add New Admins / Promote Members</b> permission first.", parse_mode="HTML")
+
+    user_id, display, custom_title = await resolve_promotion_target(update, context)
+    if not user_id:
+        return await update.effective_message.reply_text(
+            "Usage:\n• Reply: <code>/promote Custom Admin Tag</code>\n• Username: <code>/promote @username Custom Admin Tag</code>\n• User ID: <code>/promote user_id Custom Admin Tag</code>\n\nExample: <code>/promote @username Bishal</code>\nThe text after the member is used as their Telegram Admin Tag. Username promotion works for members the bot has already seen in this group.",
+            parse_mode="HTML",
+        )
+
+    actor_id = update.effective_user.id
+    # Keep callback data short; store the requested custom title in user_data.
+    title_key = f"promote_title:{update.effective_chat.id}:{user_id}:{actor_id}"
+    context.user_data[title_key] = custom_title or None
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🛡 Normal", callback_data=f"pr:normal:{user_id}:{actor_id}")],
+        [InlineKeyboardButton("⚡ Powerful", callback_data=f"pr:powerful:{user_id}:{actor_id}")],
+        [InlineKeyboardButton("💀 Destructive", callback_data=f"pr:destructive:{user_id}:{actor_id}")],
+    ])
+    await update.effective_message.reply_text(
+        f"<b>Promote {display}</b>\n"
+        f"🏷 Admin Tag: <b>{custom_title or 'No custom tag'}</b>\n\n"
+        "🛡 <b>Normal</b> — Delete messages, Pin messages, Manage live streams\n"
+        "⚡ <b>Powerful</b> — All Normal rights + Change group info\n"
+        "💀 <b>Destructive</b> — Powerful rights + Ban/restrict users, Invite/add users, Add new admins and management rights\n\n"
+        "Choose the admin level:",
+        parse_mode="HTML", reply_markup=keyboard,
+    )
+
+async def promote_callback(update, context):
+    q = update.callback_query
+    try:
+        _, level, raw_user_id, raw_actor_id = q.data.split(":", 3)
+        user_id, actor_id = int(raw_user_id), int(raw_actor_id)
+    except Exception:
+        return await q.answer("Invalid promotion request.", show_alert=True)
+
+    if q.from_user.id != actor_id:
+        return await q.answer("Only the admin who opened this promotion menu can choose the level.", show_alert=True)
+    if not await _promotion_allowed(update):
+        return await q.answer("You no longer have permission to add admins.", show_alert=True)
+    if not await _bot_can_promote(update):
+        return await q.answer("The bot no longer has permission to add admins.", show_alert=True)
+
+    rights = PROMOTE_LEVELS.get(level)
+    if not rights:
+        return await q.answer("Unknown admin level.", show_alert=True)
+
+    title_key = f"promote_title:{update.effective_chat.id}:{user_id}:{actor_id}"
+    custom_title = context.user_data.pop(title_key, None)
+
+    try:
+        await q.answer("Promoting member…")
+        await update.effective_chat.promote_member(user_id=user_id, **{k: v for k, v in rights.items() if k != "title"})
+        # Use the tag supplied in /promote, not the permission-level name.
+        if custom_title:
+            try:
+                await update.effective_chat.set_administrator_custom_title(user_id=user_id, custom_title=custom_title[:16])
+            except Exception:
+                pass
+        await q.edit_message_text(
+            f"✅ <b>Promotion successful!</b>\n\n"
+            f"User ID: <code>{user_id}</code>\n"
+            f"Admin level: <b>{rights['title']}</b>\n"
+            f"Admin Tag: <b>{custom_title or 'Not set'}</b>",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await q.answer("Promotion failed.", show_alert=True)
+        await q.edit_message_text(f"❌ <b>Could not promote this member.</b>\n<code>{e}</code>", parse_mode="HTML")
