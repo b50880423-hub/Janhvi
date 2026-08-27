@@ -1,4 +1,4 @@
-from database.mongo import get_group, update_group
+from database.mongo import get_group, update_group, save_mute_record
 from config import DEFAULT_SETTINGS
 from utils.keyboards import settings_keyboard
 from utils.permissions import is_admin
@@ -57,9 +57,11 @@ async def review_callback(update, context):
         if action=='mute5':
             until=int(datetime.now(timezone.utc).timestamp()+300)
             await context.bot.restrict_chat_member(chat_id,user_id,ChatPermissions.no_permissions(),until_date=until)
+            await save_mute_record(chat_id, user_id, 5, doc.get('reason') or 'Admin review mute')
         elif action=='mute60':
             until=int(datetime.now(timezone.utc).timestamp()+3600)
             await context.bot.restrict_chat_member(chat_id,user_id,ChatPermissions.no_permissions(),until_date=until)
+            await save_mute_record(chat_id, user_id, 60, doc.get('reason') or 'Admin review mute')
         elif action=='trust':
             await upsert_user(chat_id,user_id,{'trusted':True})
         if action=='ban':
