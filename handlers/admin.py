@@ -90,7 +90,7 @@ def target_user(update, context):
 
 
 async def require_ban_permission(update):
-    """Allow only the group owner or admins who have Telegram's ban/restrict-members power."""
+    """Allow the owner or an admin with Telegram's restrict/ban-members right."""
     chat = update.effective_chat
     user = update.effective_user
     if not chat or not user:
@@ -99,19 +99,49 @@ async def require_ban_permission(update):
         member = await update.get_bot().get_chat_member(chat.id, user.id)
     except Exception:
         return False
-    if member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.CREATOR):
+    status = str(getattr(member, "status", ""))
+    if status in (str(ChatMemberStatus.OWNER), str(ChatMemberStatus.CREATOR), "owner", "creator"):
         return True
     return bool(
-        member.status == ChatMemberStatus.ADMINISTRATOR
+        status in (str(ChatMemberStatus.ADMINISTRATOR), "administrator")
         and getattr(member, "can_restrict_members", False)
     )
 
 async def deny_ban_permission(update):
     if update.effective_message:
         await update.effective_message.reply_text(
-            "❌ You need the Telegram **Ban Users / Restrict Members** admin permission to use this command.",
-            parse_mode="Markdown"
+            "❌ You need Telegram's Ban Users / Restrict Members admin permission to use this command."
         )
+
+async def _record_ban_case(update, context, user_id, action, reason):
+    """Case/log failures must never make a successful Telegram ban look like a failure."""
+    case = None
+    try:
+        await log_event({
+            "chat_id": update.effective_chat.id,
+            "type": action,
+            "user_id": user_id,
+            "admin_id": update.effective_user.id,
+            "reason": reason,
+            "created_at": datetime.now(timezone.utc),
+        })
+    except Exception:
+        pass
+    try:
+        case = await create_case(
+            update.effective_chat.id, user_id, action,
+            update.effective_user.id, reason, await _case_evidence(update)
+        )
+        label = "Permanent Ban" if action == "permanent_ban" else "Unban"
+        await _send_admin_log(
+            context.bot, update.effective_chat.id,
+            f"{'🚫' if action == 'permanent_ban' else '🔓'} <b>CASE #{case['case_id']}</b>\n"
+            f"Action: {label}\nUser: <code>{user_id}</code>\n"
+            f"Moderator: <code>{update.effective_user.id}</code>\nReason: {reason}"
+        )
+    except Exception:
+        pass
+    return case
 
 async def ban(update, context):
     if not await require_ban_permission(update):
@@ -121,51 +151,51 @@ async def ban(update, context):
     user_id, display = await resolve_moderation_target(update, context, args)
     if not user_id:
         return await update.effective_message.reply_text(
-            "Usage:\n"
-            "• Reply: /ban [reason]\n"
-            "• User ID: /ban <user_id> [reason]\n"
-            "• Username: /ban @username [reason] (user must have been seen in this group)"
+            "🚫 <b>How to permanently ban</b>\n\n"
+            "• Reply to a member: <code>/ban reason</code>\n"
+            "• By User ID: <code>/ban 123456789 reason</code>\n"
+            "• By username: <code>/ban @username reason</code>\n\n"
+            "Note: username works only if the bot has previously recorded that member in this group.",
+            parse_mode="HTML"
         )
 
-    # For reply, every argument is the reason. Otherwise the first argument is the target.
+    if user_id == update.effective_user.id:
+        return await update.effective_message.reply_text("❌ You cannot ban yourself.")
+
     reason_parts = args if replied_user(update) else args[1:]
     reason = " ".join(reason_parts).strip() or "No reason provided"
 
     try:
-        # Refuse attempts to ban the chat owner.
         target_member = await context.bot.get_chat_member(update.effective_chat.id, user_id)
-        if target_member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.CREATOR):
+        target_status = str(getattr(target_member, "status", ""))
+        if target_status in (str(ChatMemberStatus.OWNER), str(ChatMemberStatus.CREATOR), "owner", "creator"):
             return await update.effective_message.reply_text("❌ The group owner cannot be banned.")
     except Exception:
-        # The target may already have left the group; Telegram can still ban by ID in many cases.
         pass
 
+    # Do the actual Telegram action first. A successful ban is not rolled back if logging fails.
     try:
-        await context.bot.ban_chat_member(update.effective_chat.id, user_id)
-        await log_event({
-            "chat_id": update.effective_chat.id,
-            "type": "permanent_ban",
-            "user_id": user_id,
-            "admin_id": update.effective_user.id,
-            "reason": reason,
-            "created_at": datetime.now(timezone.utc),
-        })
-        case = await create_case(update.effective_chat.id, user_id, "permanent_ban", update.effective_user.id, reason, await _case_evidence(update))
-        await _send_admin_log(context.bot, update.effective_chat.id, f"🚫 <b>CASE #{case['case_id']}</b>\nAction: Permanent Ban\nUser: <code>{user_id}</code>\nModerator: <code>{update.effective_user.id}</code>\nReason: {reason}")
-        await update.effective_message.reply_text(
-            f"🚫 Permanently banned {display}.\n📝 Reason: {reason}\n📁 Case: #{case['case_id']}", parse_mode="HTML"
-        )
-        try:
-            await context.bot.send_message(
-                user_id,
-                f"🚫 <b>You were permanently banned</b> from <b>{update.effective_chat.title}</b>.\n"
-                f"📝 Reason: {reason}",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+        await context.bot.ban_chat_member(update.effective_chat.id, user_id, revoke_messages=False)
     except Exception as e:
-        await update.effective_message.reply_text(f"❌ Could not ban user: {e}")
+        return await update.effective_message.reply_text(
+            f"❌ <b>Telegram could not ban this member.</b>\n\n<code>{e}</code>\n\n"
+            "Make sure the bot is an admin and has Ban Users / Restrict Members permission. "
+            "The target must not be the group owner.", parse_mode="HTML"
+        )
+
+    case = await _record_ban_case(update, context, user_id, "permanent_ban", reason)
+    case_text = f"\n📁 Case: #{case['case_id']}" if case else ""
+    await update.effective_message.reply_text(
+        f"🚫 Permanently banned {display}.\n📝 Reason: {reason}{case_text}", parse_mode="HTML"
+    )
+    try:
+        await context.bot.send_message(
+            user_id,
+            f"🚫 <b>You were permanently banned</b> from <b>{update.effective_chat.title}</b>.\n"
+            f"📝 Reason: {reason}", parse_mode="HTML"
+        )
+    except Exception:
+        pass
 
 async def unban(update, context):
     if not await require_ban_permission(update):
@@ -175,28 +205,23 @@ async def unban(update, context):
     user_id, display = await resolve_moderation_target(update, context, args)
     if not user_id:
         return await update.effective_message.reply_text(
-            "Usage:\n"
-            "• User ID: /unban <user_id>\n"
-            "• Username: /unban @username (user must have been seen in this group before being banned)"
+            "🔓 <b>How to unban</b>\n\n"
+            "• <code>/unban 123456789</code>\n"
+            "• <code>/unban @username</code> (if recorded by the bot)", parse_mode="HTML"
         )
 
     try:
-        await context.bot.unban_chat_member(
-            update.effective_chat.id, user_id, only_if_banned=True
-        )
-        await log_event({
-            "chat_id": update.effective_chat.id,
-            "type": "unban",
-            "user_id": user_id,
-            "admin_id": update.effective_user.id,
-            "reason": "Manual admin unban",
-            "created_at": datetime.now(timezone.utc),
-        })
-        case = await create_case(update.effective_chat.id, user_id, "unban", update.effective_user.id, "Manual admin unban")
-        await _send_admin_log(context.bot, update.effective_chat.id, f"🔓 <b>CASE #{case['case_id']}</b>\nAction: Unban\nUser: <code>{user_id}</code>\nModerator: <code>{update.effective_user.id}</code>")
-        await update.effective_message.reply_text(f"🔓 Unbanned {display}. They can join the group again.\n📁 Case: #{case['case_id']}", parse_mode="HTML")
+        await context.bot.unban_chat_member(update.effective_chat.id, user_id, only_if_banned=True)
     except Exception as e:
-        await update.effective_message.reply_text(f"❌ Could not unban user: {e}")
+        return await update.effective_message.reply_text(
+            f"❌ <b>Telegram could not unban this user.</b>\n\n<code>{e}</code>", parse_mode="HTML"
+        )
+
+    case = await _record_ban_case(update, context, user_id, "unban", "Manual admin unban")
+    case_text = f"\n📁 Case: #{case['case_id']}" if case else ""
+    await update.effective_message.reply_text(
+        f"🔓 Unbanned {display}. They can join the group again.{case_text}", parse_mode="HTML"
+    )
 
 async def warn(update, context):
     if not await require_admin(update): return await deny(update)
