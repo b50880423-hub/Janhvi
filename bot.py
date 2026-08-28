@@ -5,7 +5,7 @@ from database.mongo import connect_db
 from handlers.start import start
 from handlers.admin import (
     settings, help_cmd, warn, mute, unmute, whitelist, unwhitelist, blacklist, unblacklist,
-    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal, appeal_flow_callback, appeal_reason_message, promote, promote_callback, demote, ban, unban, case_cmd, userhistory, evidence, setlog, removelog, logstatus
+    userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal, appeal_flow_callback, appeal_reason_message, promote, promote_callback, demote, ban, unban, case_cmd, userhistory, evidence, setlog, removelog, logstatus, rules, rules_callback
 )
 from handlers.callbacks import settings_callback, security_callback, review_callback, appeal_callback
 from handlers.moderation import moderate_message, monitor_member
@@ -26,7 +26,7 @@ def main():
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is missing")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     commands = {
-        "start": start, "help": help_cmd, "settings": settings, "appeal": appeal, "apeal": appeal,
+        "start": start, "help": help_cmd, "settings": settings, "rules": rules, "rule": rules, "appeal": appeal, "apeal": appeal,
         "warn": warn, "mute": mute, "unmute": unmute, "ban": ban, "unban": unban, "case": case_cmd, "cases": userhistory, "userhistory": userhistory, "evidence": evidence, "setlog": setlog, "removelog": removelog, "logstatus": logstatus,
         "whitelist": whitelist, "unwhitelist": unwhitelist,
         "blacklist": blacklist, "unblacklist": unblacklist,
@@ -39,6 +39,7 @@ def main():
         "trust": trust, "untrust": untrust, "silentmode": silentmode, "threatlevel": threatlevel, "lockdown": lockdown, "unlockdown": unlockdown, "nsfwstickers": nsfwstickers, "profile": member_profile,
     }
     for name, handler in commands.items(): app.add_handler(CommandHandler(name, handler))
+    app.add_handler(CallbackQueryHandler(rules_callback, pattern=r"^rules:"))
     app.add_handler(CallbackQueryHandler(settings_callback, pattern=r"^as:"))
     app.add_handler(CallbackQueryHandler(security_callback, pattern=r"^sec:"))
     app.add_handler(CallbackQueryHandler(review_callback, pattern=r"^rv:"))
