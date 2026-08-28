@@ -6,6 +6,7 @@ from database.mongo import (
     upsert_user, get_user, get_user_by_username, get_recent_events, log_event
 )
 from database.mongo import save_mute_record, get_mute_record, create_appeal
+from services.cases import create_case, get_case, get_cases, counts as case_counts
 from config import DEFAULT_SETTINGS, LOGGER_CHAT_ID
 from utils.permissions import is_admin
 from utils.keyboards import settings_keyboard
@@ -18,6 +19,19 @@ async def require_admin(update):
 async def deny(update):
     if update.effective_message:
         await update.effective_message.reply_text("❌ Admins only.")
+
+async def _case_evidence(update):
+    r = update.effective_message.reply_to_message if update.effective_message else None
+    if not r: return {}
+    text = r.text or r.caption or ''
+    return {"message_id": r.message_id, "text": text[:4000], "date": r.date.isoformat() if r.date else None}
+
+async def _send_admin_log(bot, source_chat_id, text):
+    group = await get_group(source_chat_id, DEFAULT_SETTINGS)
+    log_id = group.get("log_chat_id")
+    if log_id:
+        try: await bot.send_message(int(log_id), text, parse_mode="HTML")
+        except Exception: pass
 
 async def settings(update, context):
     if not await require_admin(update): return await deny(update)
@@ -35,7 +49,7 @@ async def help_cmd(update, context):
         "/mute <user_id|@username> [minutes] — manually mute user\n"
         "/appeal <reason> — appeal a mute (use in bot DM)\n"
         "/unmute — unmute replied user\n"
-        "/unmute <user_id|@username> — manually unmute user\n\n"
+        "/unmute <user_id|@username> — manually unmute user\n/ban [reason] — permanently ban replied user\n/ban <user_id|@username> [reason] — permanently ban user\n/unban <user_id|@username> — manually remove a permanent ban\n\n"
         "<b>Protection</b>\n"
         "/antispam — show/toggle protection\n"
         "/lock [type] — lock a content type\n"
@@ -74,6 +88,116 @@ def target_user(update, context):
         return int(context.args[0])
     return None
 
+
+async def require_ban_permission(update):
+    """Allow only the group owner or admins who have Telegram's ban/restrict-members power."""
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or not user:
+        return False
+    try:
+        member = await update.get_bot().get_chat_member(chat.id, user.id)
+    except Exception:
+        return False
+    if member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.CREATOR):
+        return True
+    return bool(
+        member.status == ChatMemberStatus.ADMINISTRATOR
+        and getattr(member, "can_restrict_members", False)
+    )
+
+async def deny_ban_permission(update):
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            "❌ You need the Telegram **Ban Users / Restrict Members** admin permission to use this command.",
+            parse_mode="Markdown"
+        )
+
+async def ban(update, context):
+    if not await require_ban_permission(update):
+        return await deny_ban_permission(update)
+
+    args = list(context.args)
+    user_id, display = await resolve_moderation_target(update, context, args)
+    if not user_id:
+        return await update.effective_message.reply_text(
+            "Usage:\n"
+            "• Reply: /ban [reason]\n"
+            "• User ID: /ban <user_id> [reason]\n"
+            "• Username: /ban @username [reason] (user must have been seen in this group)"
+        )
+
+    # For reply, every argument is the reason. Otherwise the first argument is the target.
+    reason_parts = args if replied_user(update) else args[1:]
+    reason = " ".join(reason_parts).strip() or "No reason provided"
+
+    try:
+        # Refuse attempts to ban the chat owner.
+        target_member = await context.bot.get_chat_member(update.effective_chat.id, user_id)
+        if target_member.status in (ChatMemberStatus.OWNER, ChatMemberStatus.CREATOR):
+            return await update.effective_message.reply_text("❌ The group owner cannot be banned.")
+    except Exception:
+        # The target may already have left the group; Telegram can still ban by ID in many cases.
+        pass
+
+    try:
+        await context.bot.ban_chat_member(update.effective_chat.id, user_id)
+        await log_event({
+            "chat_id": update.effective_chat.id,
+            "type": "permanent_ban",
+            "user_id": user_id,
+            "admin_id": update.effective_user.id,
+            "reason": reason,
+            "created_at": datetime.now(timezone.utc),
+        })
+        case = await create_case(update.effective_chat.id, user_id, "permanent_ban", update.effective_user.id, reason, await _case_evidence(update))
+        await _send_admin_log(context.bot, update.effective_chat.id, f"🚫 <b>CASE #{case['case_id']}</b>\nAction: Permanent Ban\nUser: <code>{user_id}</code>\nModerator: <code>{update.effective_user.id}</code>\nReason: {reason}")
+        await update.effective_message.reply_text(
+            f"🚫 Permanently banned {display}.\n📝 Reason: {reason}\n📁 Case: #{case['case_id']}", parse_mode="HTML"
+        )
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"🚫 <b>You were permanently banned</b> from <b>{update.effective_chat.title}</b>.\n"
+                f"📝 Reason: {reason}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ Could not ban user: {e}")
+
+async def unban(update, context):
+    if not await require_ban_permission(update):
+        return await deny_ban_permission(update)
+
+    args = list(context.args)
+    user_id, display = await resolve_moderation_target(update, context, args)
+    if not user_id:
+        return await update.effective_message.reply_text(
+            "Usage:\n"
+            "• User ID: /unban <user_id>\n"
+            "• Username: /unban @username (user must have been seen in this group before being banned)"
+        )
+
+    try:
+        await context.bot.unban_chat_member(
+            update.effective_chat.id, user_id, only_if_banned=True
+        )
+        await log_event({
+            "chat_id": update.effective_chat.id,
+            "type": "unban",
+            "user_id": user_id,
+            "admin_id": update.effective_user.id,
+            "reason": "Manual admin unban",
+            "created_at": datetime.now(timezone.utc),
+        })
+        case = await create_case(update.effective_chat.id, user_id, "unban", update.effective_user.id, "Manual admin unban")
+        await _send_admin_log(context.bot, update.effective_chat.id, f"🔓 <b>CASE #{case['case_id']}</b>\nAction: Unban\nUser: <code>{user_id}</code>\nModerator: <code>{update.effective_user.id}</code>")
+        await update.effective_message.reply_text(f"🔓 Unbanned {display}. They can join the group again.\n📁 Case: #{case['case_id']}", parse_mode="HTML")
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ Could not unban user: {e}")
+
 async def warn(update, context):
     if not await require_admin(update): return await deny(update)
     u = replied_user(update)
@@ -81,7 +205,9 @@ async def warn(update, context):
         return await update.effective_message.reply_text("Reply to a user's message.")
     from database.mongo import add_violation
     c = await add_violation(update.effective_chat.id, u.id, "manual warning")
-    await update.effective_message.reply_text(f"⚠️ Warning added to {u.mention_html()}. Total: {c}", parse_mode="HTML")
+    case = await create_case(update.effective_chat.id, u.id, "warning", update.effective_user.id, "Manual warning", await _case_evidence(update))
+    await _send_admin_log(context.bot, update.effective_chat.id, f"⚠️ <b>CASE #{case['case_id']}</b>\nAction: Warning\nUser: <code>{u.id}</code>\nModerator: <code>{update.effective_user.id}</code>")
+    await update.effective_message.reply_text(f"⚠️ Warning added to {u.mention_html()}. Total: {c}\n📁 Case: #{case['case_id']}", parse_mode="HTML")
 
 async def resolve_moderation_target(update, context, args):
     """Resolve a target from a reply, numeric Telegram ID, or @username."""
@@ -139,7 +265,9 @@ async def mute(update, context):
             user_id, permissions=ChatPermissions.no_permissions(), until_date=until
         )
         await save_mute_record(update.effective_chat.id, user_id, minutes, "Manual admin mute")
-        await update.effective_message.reply_text(f"🔇 Muted {display} for {minutes} minutes.", parse_mode="HTML")
+        case = await create_case(update.effective_chat.id, user_id, "mute", update.effective_user.id, "Manual admin mute", await _case_evidence(update))
+        await _send_admin_log(context.bot, update.effective_chat.id, f"🔇 <b>CASE #{case['case_id']}</b>\nAction: Mute ({minutes} minutes)\nUser: <code>{user_id}</code>\nModerator: <code>{update.effective_user.id}</code>")
+        await update.effective_message.reply_text(f"🔇 Muted {display} for {minutes} minutes.\n📁 Case: #{case['case_id']}", parse_mode="HTML")
         try:
             await context.bot.send_message(user_id, f"🔇 <b>You were muted</b> in <b>{update.effective_chat.title}</b> for {minutes} minutes.\nReason: Manual admin mute\n\nIf you believe this was a mistake, send me /appeal followed by your explanation.", parse_mode="HTML")
         except Exception:
@@ -163,9 +291,9 @@ async def unmute(update, context):
         await update.effective_chat.restrict_member(
             user_id, permissions=ChatPermissions.all_permissions()
         )
-        await update.effective_message.reply_text(
-            f"🔊 Unmuted {display}.", parse_mode="HTML"
-        )
+        case = await create_case(update.effective_chat.id, user_id, "unmute", update.effective_user.id, "Manual admin unmute")
+        await _send_admin_log(context.bot, update.effective_chat.id, f"🔊 <b>CASE #{case['case_id']}</b>\nAction: Unmute\nUser: <code>{user_id}</code>\nModerator: <code>{update.effective_user.id}</code>")
+        await update.effective_message.reply_text(f"🔊 Unmuted {display}.\n📁 Case: #{case['case_id']}", parse_mode="HTML")
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Could not unmute: {e}")
 
@@ -796,57 +924,24 @@ PROMOTE_LEVELS = {
     },
     "powerful": {
         "title": "Powerful Admin",
-        "can_change_info": True,
-        "can_pin_messages": True,
         "can_delete_messages": True,
-        "can_restrict_members": True,
+        "can_pin_messages": True,
         "can_manage_video_chats": True,
-        # Telegram exposes story administration as separate rights.
-        "can_post_stories": True,
-        "can_edit_stories": True,
-        "can_delete_stories": True,
+        "can_change_info": True,
     },
     "destructive": {
         "title": "Destructive Admin",
-        "can_change_info": True,
-        "can_pin_messages": True,
         "can_delete_messages": True,
-        "can_restrict_members": True,
+        "can_pin_messages": True,
         "can_manage_video_chats": True,
-        "can_post_stories": True,
-        "can_edit_stories": True,
-        "can_delete_stories": True,
+        "can_change_info": True,
+        "can_restrict_members": True,
         "can_invite_users": True,
         "can_promote_members": True,
+        "can_manage_chat": True,
+        "can_manage_topics": True,
     },
 }
-
-PROMOTE_RIGHTS_INFO = (
-    "ℹ️ <b>ADMIN RIGHTS INFORMATION</b>\n\n"
-    "🛡 <b>Normal Admin</b>\n"
-    "• Delete messages\n"
-    "• Pin messages\n"
-    "• Manage live streams\n\n"
-    "⚡ <b>Powerful Admin</b>\n"
-    "• Change group info\n"
-    "• Pin messages\n"
-    "• Edit/manage member tags (where Telegram allows)\n"
-    "• Manage stories\n"
-    "• Ban / restrict users\n"
-    "• Delete messages\n"
-    "• Manage live streams\n\n"
-    "💀 <b>Destructive Admin</b>\n"
-    "• Change group info\n"
-    "• Pin messages\n"
-    "• Edit/manage member tags (where Telegram allows)\n"
-    "• Manage stories\n"
-    "• Ban / restrict users\n"
-    "• Delete messages\n"
-    "• Manage live streams\n"
-    "• Invite users via link\n"
-    "• Add new admins\n\n"
-    "<i>Only the rights that the bot itself has are granted by Telegram.</i>"
-)
 
 async def _promotion_allowed(update):
     """Only an admin with Add New Admins / Promote Members permission may promote."""
@@ -937,15 +1032,13 @@ async def promote(update, context):
         [InlineKeyboardButton("🛡 Normal", callback_data=f"pr:normal:{user_id}:{actor_id}")],
         [InlineKeyboardButton("⚡ Powerful", callback_data=f"pr:powerful:{user_id}:{actor_id}")],
         [InlineKeyboardButton("💀 Destructive", callback_data=f"pr:destructive:{user_id}:{actor_id}")],
-        [InlineKeyboardButton("ℹ️ Rights Information", callback_data=f"pr:info:0:{actor_id}")],
     ])
     await update.effective_message.reply_text(
         f"<b>Promote {display}</b>\n"
         f"🏷 Admin Tag: <b>{custom_title or 'No custom tag'}</b>\n\n"
         "🛡 <b>Normal</b> — Delete messages, Pin messages, Manage live streams\n"
-        "⚡ <b>Powerful</b> — Group info, Pin, Member-tag management, Stories, Ban/restrict, Delete, Live streams\n"
-        "💀 <b>Destructive</b> — Powerful rights + Invite users via link + Add new admins\n\n"
-        "Tap ℹ️ Rights Information to see the full permission list.\n\n"
+        "⚡ <b>Powerful</b> — All Normal rights + Change group info\n"
+        "💀 <b>Destructive</b> — Powerful rights + Ban/restrict users, Invite/add users, Add new admins and management rights\n\n"
         "Choose the admin level:",
         parse_mode="HTML", reply_markup=keyboard,
     )
@@ -957,15 +1050,6 @@ async def promote_callback(update, context):
         user_id, actor_id = int(raw_user_id), int(raw_actor_id)
     except Exception:
         return await q.answer("Invalid promotion request.", show_alert=True)
-
-    # Rights information is available to every admin who currently has
-    # Telegram's Add New Admins / Promote Members permission.
-    if level == "info":
-        if q.from_user.id != actor_id:
-            return await q.answer("Open /promote yourself to view this menu.", show_alert=True)
-        if not await _promotion_allowed(update):
-            return await q.answer("You need the Add New Admins permission to view this information.", show_alert=True)
-        return await q.answer(PROMOTE_RIGHTS_INFO, show_alert=True)
 
     if q.from_user.id != actor_id:
         return await q.answer("Only the admin who opened this promotion menu can choose the level.", show_alert=True)
@@ -1057,3 +1141,43 @@ async def demote(update, context):
         )
     except Exception as e:
         await update.effective_message.reply_text(f"❌ Could not demote this admin: <code>{e}</code>", parse_mode="HTML")
+
+async def case_cmd(update, context):
+    if not await require_admin(update): return await deny(update)
+    if not context.args or not context.args[0].isdigit(): return await update.effective_message.reply_text("Usage: /case <case_id>")
+    doc=await get_case(update.effective_chat.id,int(context.args[0]))
+    if not doc: return await update.effective_message.reply_text("❌ Case not found.")
+    await update.effective_message.reply_text(f"📁 <b>CASE #{doc['case_id']}</b>\nAction: {doc['action']}\nUser ID: <code>{doc['user_id']}</code>\nModerator ID: <code>{doc['admin_id']}</code>\nReason: {doc['reason']}\nStatus: {doc['status']}\nTime: {doc['created_at'].strftime('%d %b %Y %H:%M UTC')}",parse_mode='HTML')
+
+async def userhistory(update, context):
+    if not await require_admin(update): return await deny(update)
+    uid,_=await resolve_moderation_target(update,context,list(context.args))
+    if not uid: return await update.effective_message.reply_text("Reply to a user or use /userhistory <user_id|@username>.")
+    rows=await get_cases(update.effective_chat.id,uid,20); c=await case_counts(update.effective_chat.id,uid)
+    lines=[f"📋 <b>USER MODERATION HISTORY</b>",f"User ID: <code>{uid}</code>",f"Warnings: {c.get('warning',0)} | Mutes: {c.get('mute',0)} | Bans: {c.get('permanent_ban',0)}","", "Recent cases:"]
+    lines += [f"#{x['case_id']} — {x['action']} — {x['reason']}" for x in rows] or ["No cases found."]
+    await update.effective_message.reply_text("\n".join(lines),parse_mode='HTML')
+
+async def evidence(update, context):
+    if not await require_admin(update): return await deny(update)
+    if not context.args or not context.args[0].isdigit(): return await update.effective_message.reply_text("Usage: /evidence <case_id>")
+    doc=await get_case(update.effective_chat.id,int(context.args[0])); ev=(doc or {}).get('evidence') or {}
+    if not doc: return await update.effective_message.reply_text("❌ Case not found.")
+    text=ev.get('text') or 'No message evidence was stored for this case.'
+    await update.effective_message.reply_text(f"🧾 <b>EVIDENCE — CASE #{doc['case_id']}</b>\n{text}",parse_mode='HTML')
+
+async def setlog(update, context):
+    if not await require_admin(update): return await deny(update)
+    if not context.args or not context.args[0].lstrip('-').isdigit(): return await update.effective_message.reply_text("Usage: /setlog <log_group_or_channel_id>")
+    await update_group(update.effective_chat.id, {'log_chat_id':int(context.args[0])})
+    await update.effective_message.reply_text("✅ Admin log destination saved.")
+
+async def removelog(update, context):
+    if not await require_admin(update): return await deny(update)
+    await update_group(update.effective_chat.id, {'log_chat_id':None})
+    await update.effective_message.reply_text("✅ Admin log destination removed.")
+
+async def logstatus(update, context):
+    if not await require_admin(update): return await deny(update)
+    g=await get_group(update.effective_chat.id,DEFAULT_SETTINGS); lid=g.get('log_chat_id')
+    await update.effective_message.reply_text(f"📜 Admin Log: {'Enabled ('+str(lid)+')' if lid else 'Not configured'}")
