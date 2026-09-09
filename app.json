@@ -1,0 +1,21 @@
+{
+  "name": "janhvi-telegram-bot",
+  "description": "Janhvi Telegram moderation bot with persistent owner-controlled welcome system",
+  "keywords": ["telegram", "bot", "python", "mongodb", "welcome"],
+  "stack": "heroku-24",
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "basic"
+    }
+  },
+  "env": {
+    "BOT_TOKEN": {"description": "Telegram bot token", "required": true},
+    "BOT_OWNER_IDS": {"description": "Comma-separated Telegram user IDs allowed to manage bot-wide settings", "required": true},
+    "MONGO_URI": {"description": "MongoDB connection URI used for persistent bot configuration", "required": true},
+    "MONGO_DB": {"description": "MongoDB database name", "value": "antispam_bot"},
+    "API_ID": {"description": "Telegram API ID if required by the bot", "required": false},
+    "API_HASH": {"description": "Telegram API hash if required by the bot", "required": false},
+    "SESSION_STRING": {"description": "Optional Telegram session string", "required": false}
+  }
+}
