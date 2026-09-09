@@ -106,3 +106,36 @@ Automatic moderation remains **delete + temporary mute only**: 30m, 1h, 2h, 6h, 
 
 ### Privacy note
 The Owner Vault is an explicit group-owner moderation feature. The bot stores whisper content server-side in encrypted form so the owner can perform read-only audits. This should be disclosed to group members in your own privacy policy/rules.
+
+
+## Advanced Owner Welcome System
+
+The group owner can configure a rich welcome system with `/welcome`.
+
+### Commands
+- `/welcome` — show current configuration
+- `/welcome help` — complete help
+- `/welcome on` / `/welcome off`
+- `/welcome set TEXT` — set custom text
+- Reply to a text/photo/video/GIF/document with `/welcome set` — save that message/media as the welcome
+- `/welcome test` — preview the welcome
+- `/welcome reset` — reset welcome configuration
+- `/welcome deleteafter SECONDS` — auto-delete welcome (0 disables)
+- `/welcome button LABEL | URL` — add an inline URL button
+- `/welcome buttons` — view buttons
+- `/welcome clearbuttons` — remove buttons
+- `/welcome mention on/off`
+- `/welcome photo on/off`
+
+### Variables
+`{name}`, `{full_name}`, `{mention}`, `{username}`, `{id}`, `{chat}`, `{chat_id}`, `{count}`, `{date}`, `{time}`
+
+The configuration is stored per group in MongoDB. Only the Telegram group owner can change it.
+
+## Welcome persistence across redeploys
+
+Welcome settings are stored in the MongoDB `welcome_configs` collection, not in local files or process memory. A restart, Render redeploy, container replacement, or code update therefore does not reset an owner's welcome configuration.
+
+Keep the same `MONGO_URI` and `MONGO_DB` environment variables across deployments. Do **not** replace the MongoDB database/cluster if you want to keep the existing welcomes.
+
+The startup migration only adds missing fields to old welcome documents; it never overwrites an existing custom message, media, buttons, enabled state, or delete timer.

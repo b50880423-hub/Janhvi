@@ -9,9 +9,10 @@ violations = None
 events = None
 whispers = None
 whisper_sessions = None
+welcome_configs = None
 
 async def connect_db():
-    global client, db, groups, users, violations, events, whispers, whisper_sessions, mute_records, appeals
+    global client, db, groups, users, violations, events, whispers, whisper_sessions, mute_records, appeals, welcome_configs
     if not MONGO_URI:
         raise RuntimeError("MONGO_URI is missing")
     client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=10000)
@@ -23,6 +24,7 @@ async def connect_db():
     events = db.events
     whispers = db.whispers
     whisper_sessions = db.whisper_sessions
+    welcome_configs = db.welcome_configs
     mute_records = db.mute_records
     appeals = db.appeals
 
@@ -39,6 +41,7 @@ async def connect_db():
     await whispers.create_index("expires_at", expireAfterSeconds=0)
     await whisper_sessions.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
     await whisper_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await welcome_configs.create_index("chat_id", unique=True)
     await mute_records.create_index([("chat_id", 1), ("user_id", 1)])
     await appeals.create_index([("chat_id", 1), ("user_id", 1), ("status", 1)])
 
@@ -149,3 +152,49 @@ async def resolve_appeal(appeal_id, action, admin_id):
     if not doc: return None
     await ap.update_one({'_id':oid},{'$set':{'status':action,'resolved_by':admin_id}})
     return doc
+
+
+WELCOME_DEFAULTS = {
+    "enabled": False,
+    "text": "",
+    "media_type": "text",
+    "file_id": None,
+    "delete_after": 0,
+    "buttons": [],
+    "mention": True,
+    "profile_photo": False,
+}
+
+async def get_welcome_config(chat_id):
+    """Load the durable welcome configuration from MongoDB.
+
+    Important: this function NEVER recreates or resets an existing welcome on
+    process restart/redeploy. Missing fields are only added for migrations;
+    existing owner settings are left untouched.
+    """
+    global welcome_configs
+    if welcome_configs is None:
+        if db is None:
+            raise RuntimeError("Database is not connected")
+        welcome_configs = db.welcome_configs
+    doc = await welcome_configs.find_one({"chat_id": chat_id})
+    if not doc:
+        return None
+    missing = {k: v for k, v in WELCOME_DEFAULTS.items() if k not in doc}
+    if missing:
+        await welcome_configs.update_one({"_id": doc["_id"]}, {"$set": missing})
+        doc.update(missing)
+    return doc
+
+async def update_welcome_config(chat_id, data):
+    global welcome_configs
+    if welcome_configs is None:
+        if db is None:
+            raise RuntimeError("Database is not connected")
+        welcome_configs = db.welcome_configs
+    await welcome_configs.update_one({"chat_id": chat_id}, {"$set": {"chat_id": chat_id, **data}}, upsert=True)
+
+async def delete_welcome_config(chat_id):
+    global welcome_configs
+    if welcome_configs is not None:
+        await welcome_configs.delete_one({"chat_id": chat_id})
