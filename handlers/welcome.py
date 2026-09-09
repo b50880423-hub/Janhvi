@@ -1,10 +1,14 @@
 import re
+import time
 from datetime import datetime, timezone
 from html import escape
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ChatType
 from database.mongo import get_group, get_welcome_config, update_welcome_config, delete_welcome_config
 from config import DEFAULT_SETTINGS
+
+_WELCOME_DEDUP = {}
+_WELCOME_DEDUP_TTL = 15
 
 DEFAULT_WELCOME = (
     "🎉 <b>Welcome {mention}!</b>\n\n"
@@ -170,10 +174,23 @@ async def welcome_cmd(update, context):
         )
     return await update.effective_message.reply_text("Unknown option. Use <code>/welcome help</code>.",parse_mode="HTML")
 
+def _welcome_already_sent(chat_id, user_id):
+    now = time.monotonic()
+    key = (chat_id, user_id)
+    # Drop expired entries.
+    for k, ts in list(_WELCOME_DEDUP.items()):
+        if now - ts > _WELCOME_DEDUP_TTL:
+            _WELCOME_DEDUP.pop(k, None)
+    if key in _WELCOME_DEDUP:
+        return True
+    _WELCOME_DEDUP[key] = now
+    return False
+
 async def send_welcome(chat, context, user, test=False):
     if chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP): return
     cfg=await get_welcome_config(chat.id)
     if not cfg or (not cfg.get("enabled") and not test): return
+    if not test and _welcome_already_sent(chat.id, user.id): return
     count=0
     try:
         count=await context.bot.get_chat_member_count(chat.id)
