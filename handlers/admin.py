@@ -39,42 +39,37 @@ async def settings(update, context):
     await update.effective_message.reply_text("🛡️ <b>AntiSpam Settings</b>", parse_mode="HTML", reply_markup=settings_keyboard(s))
 
 async def help_cmd(update, context):
-    await update.effective_message.reply_text(
-        "<b>🛡️ Advanced AntiSpam Commands</b>\n\n"
-        "<b>Moderation</b>\n"
-        "/warn — warn replied user\n"
-        "/warnings — show warnings\n"
-        "/resetwarnings — reset warnings\n"
-        "/mute [minutes] — mute replied user\n"
-        "/mute <user_id|@username> [minutes] — manually mute user\n"
-        "/appeal <reason> — appeal a mute (use in bot DM)\n"
-        "/unmute — unmute replied user\n"
-        "/unmute <user_id|@username> — manually unmute user\n/ban [reason] — permanently ban replied user\n/ban <user_id|@username> [reason] — permanently ban user\n/unban <user_id|@username> — manually remove a permanent ban\n\n"
-        "<b>Protection</b>\n"
-        "/antispam — show/toggle protection\n"
-        "/lock [type] — lock a content type\n"
-        "/unlock [type] — unlock a content type\n"
-        "/lockdown — stop all normal members from sending anything\n"
-        "/unlockdown — restore normal member messaging\n"
-        "/demote — remove an admin\'s admin rights\n"
-        "/filter add <word> — add custom filter\n"
-        "/filter remove <word> — remove custom filter\n"
-        "/filter list — list filters\n\n"
-        "<b>Lists</b>\n"
-        "/whitelist — whitelist replied user\n"
-        "/unwhitelist — remove whitelist\n"
-        "/blacklist — blacklist replied user (auto delete + mute)\n"
-        "/unblacklist — remove blacklist\n\n"
-        "<b>Info</b>\n"
-        "/logs — recent moderation logs\n"
-        "/smartstatus — show smart moderation limits\n"
-        "/setlimit — adjust moderation sensitivity\n"
-        "/whisperowner — owner-only read-only Whisper Vault\n"
-        "/userinfo [ID] — user info\n"
-        "/settings — inline admin panel\n\n"
-        "Automatic punishment is <b>delete + warning first</b>; repeated violations are muted gradually.",
-        parse_mode="HTML"
+    text = (
+        "🌸 <b>JANHVI — GROUP MANAGEMENT</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        "A professional moderation and security assistant for Telegram groups.\n\n"
+        "👮 <b>Moderation</b>\n"
+        "/warn · /warnings · /resetwarnings\n"
+        "/mute · /unmute · /ban · /unban · /kick\n"
+        "/tempban · /tempmute · /purge\n\n"
+        "🔒 <b>Protection</b>\n"
+        "/antispam · /lock · /unlock · /lockdown\n"
+        "/unlockdown · /filter · /filters · /stop · /stopall\n"
+        "/badwords · /blacklist · /whitelist · /trust\n\n"
+        "📁 <b>Cases & Reports</b>\n"
+        "/report · /case · /cases · /userhistory · /evidence\n"
+        "/setlog · /logstatus · /removelog · /appeal\n\n"
+        "📝 <b>Group Tools</b>\n"
+        "/welcome · /goodbye · /setgoodbye\n"
+        "/rules · /setrules · /clearrules\n"
+        "/save · /get · /notes · /clear\n"
+        "/command · /commands · /delcommand\n\n"
+        "👑 <b>Administration</b>\n"
+        "/admins · /promote · /demote · /settings\n"
+        "/userinfo · /profile · /id · /janhvi\n\n"
+        "🛡️ <b>Advanced Security</b>\n"
+        "/security · /smartstatus · /setlimit · /mode\n"
+        "/threatlevel · /reviewqueue · /domain · /nsfwstickers\n"
+        "/silentmode · /language\n\n"
+        "Use <code>/janhvi</code> for the interactive command panel.\n"
+        "Most administrative commands require the appropriate Telegram admin permission and bot permission."
     )
+    await update.effective_message.reply_text(text, parse_mode="HTML")
 
 def replied_user(update):
     msg = update.effective_message
@@ -1208,6 +1203,12 @@ def _rules_keyboard():
     ])
 
 async def rules(update, context):
+    if update.effective_chat:
+        s = await get_group(update.effective_chat.id, DEFAULT_SETTINGS)
+        saved = s.get("rules_text")
+        if saved:
+            await update.effective_message.reply_text("📜 <b>Group Rules</b>\n\n" + str(saved), parse_mode="HTML")
+            return
     await update.effective_message.reply_text(RULE_GUIDE["home"], parse_mode="HTML", reply_markup=_rules_keyboard())
 
 async def rules_callback(update, context):

@@ -10,9 +10,12 @@ events = None
 whispers = None
 whisper_sessions = None
 welcome_configs = None
+notes = None
+custom_commands = None
+temp_actions = None
 
 async def connect_db():
-    global client, db, groups, users, violations, events, whispers, whisper_sessions, mute_records, appeals, welcome_configs
+    global client, db, groups, users, violations, events, whispers, whisper_sessions, mute_records, appeals, welcome_configs, notes, custom_commands, temp_actions
     if not MONGO_URI:
         raise RuntimeError("MONGO_URI is missing")
     client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=10000)
@@ -25,6 +28,9 @@ async def connect_db():
     whispers = db.whispers
     whisper_sessions = db.whisper_sessions
     welcome_configs = db.welcome_configs
+    notes = db.notes
+    custom_commands = db.custom_commands
+    temp_actions = db.temp_actions
     mute_records = db.mute_records
     appeals = db.appeals
 
@@ -42,6 +48,10 @@ async def connect_db():
     await whisper_sessions.create_index([("chat_id", 1), ("user_id", 1)], unique=True)
     await whisper_sessions.create_index("expires_at", expireAfterSeconds=0)
     await welcome_configs.create_index("chat_id", unique=True)
+    await notes.create_index([("chat_id", 1), ("name", 1)], unique=True)
+    await custom_commands.create_index([("chat_id", 1), ("name", 1)], unique=True)
+    await temp_actions.create_index([("chat_id", 1), ("user_id", 1), ("action", 1)], unique=True)
+    await temp_actions.create_index("until")
     await mute_records.create_index([("chat_id", 1), ("user_id", 1)])
     await appeals.create_index([("chat_id", 1), ("user_id", 1), ("status", 1)])
 
@@ -177,6 +187,9 @@ async def get_welcome_config(chat_id):
         if db is None:
             raise RuntimeError("Database is not connected")
         welcome_configs = db.welcome_configs
+    notes = db.notes
+    custom_commands = db.custom_commands
+    temp_actions = db.temp_actions
     doc = await welcome_configs.find_one({"chat_id": chat_id})
     if not doc:
         return None
@@ -192,6 +205,9 @@ async def update_welcome_config(chat_id, data):
         if db is None:
             raise RuntimeError("Database is not connected")
         welcome_configs = db.welcome_configs
+    notes = db.notes
+    custom_commands = db.custom_commands
+    temp_actions = db.temp_actions
     await welcome_configs.update_one({"chat_id": chat_id}, {"$set": {"chat_id": chat_id, **data}}, upsert=True)
 
 async def delete_welcome_config(chat_id):
