@@ -40,7 +40,7 @@ async def settings(update, context):
 
 async def help_cmd(update, context):
     text = (
-        "🌸 <b>JANHVI — GROUP MANAGEMENT</b>\n"
+        "🌸 <b>PANEL — GROUP MANAGEMENT</b>\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
         "A professional moderation and security assistant for Telegram groups.\n\n"
         "👮 <b>Moderation</b>\n"
