@@ -61,12 +61,12 @@ async def help_cmd(update, context):
         "/command · /commands · /delcommand\n\n"
         "👑 <b>Administration</b>\n"
         "/admins · /promote · /demote · /settings\n"
-        "/userinfo · /profile · /id · /janhvi\n\n"
+        "/userinfo · /profile · /id · /panel\n\n"
         "🛡️ <b>Advanced Security</b>\n"
         "/security · /smartstatus · /setlimit · /mode\n"
         "/threatlevel · /reviewqueue · /domain · /nsfwstickers\n"
         "/silentmode · /language\n\n"
-        "Use <code>/janhvi</code> for the interactive command panel.\n"
+        "Use <code>/panel</code> for the interactive command panel.\n"
         "Most administrative commands require the appropriate Telegram admin permission and bot permission."
     )
     await update.effective_message.reply_text(text, parse_mode="HTML")
