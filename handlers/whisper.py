@@ -103,6 +103,195 @@ async def resolve_target(update):
         return int(raw), None
     return None, "Use /whisper @username message or reply to a user's message with /whisper message."
 
+
+async def _resolve_global_username(username):
+    """Resolve a Telegram username from the bot's known users."""
+    from database.mongo import users
+    username = (username or "").lstrip("@").strip()
+    if not username:
+        return None
+    import re
+    return await users.find_one({
+        "username": {"$regex": "^" + re.escape(username) + "$", "$options": "i"}
+    })
+
+async def _create_dm_whisper(update, context, recipient_doc, text="", media=None):
+    """Create a forwardable whisper card in the sender's bot DM.
+
+    The real media is stored only as Telegram file_id in MongoDB. The DM card
+    contains no media, so forwarding the card to a group never exposes it.
+    """
+    msg = update.effective_message
+    sender = update.effective_user
+    recipient_id = int(recipient_doc["user_id"])
+    if recipient_id == sender.id:
+        await msg.reply_text("❌ You can't whisper to yourself.")
+        return None
+
+    wid = _wid()
+    cid = _cid()
+    item = {
+        "message_id": 1,
+        "sender_id": sender.id,
+        "text": encrypt_text(text or ""),
+        "created_at": _now(),
+        "edited": False,
+    }
+    if media:
+        item["media"] = media
+
+    sender_username = sender.username
+    recipient_username = recipient_doc.get("username")
+    recipient_name = recipient_doc.get("first_name") or recipient_username or "User"
+    doc = {
+        "whisper_id": wid,
+        "conversation_id": cid,
+        "chat_id": 0,
+        "sender_id": sender.id,
+        "recipient_id": recipient_id,
+        "sender_username": sender_username,
+        "recipient_username": recipient_username,
+        "sender_name": sender.full_name,
+        "recipient_name": recipient_name,
+        "anonymous": False,
+        "messages": [item],
+        "created_at": _now(),
+        "updated_at": _now(),
+        "status": "active",
+        "public_message_id": None,
+        "source": "dm_forwardable",
+    }
+    await mongo.whispers.insert_one(doc)
+
+    kind = "Photo" if media and media.get("type") == "photo" else \
+           "Video" if media and media.get("type") == "video" else \
+           "Document" if media and media.get("type") == "document" else \
+           "Sticker" if media and media.get("type") == "sticker" else \
+           "GIF" if media and media.get("type") == "animation" else \
+           "Audio" if media and media.get("type") == "audio" else \
+           "Voice" if media and media.get("type") == "voice" else \
+           "Video note" if media and media.get("type") == "video_note" else "Message"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
+        [InlineKeyboardButton("💬 Reply", callback_data=f"ws:reply:{wid}"),
+         InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")],
+    ])
+    preview = ""
+    if text:
+        preview = f"\n\n💬 {html.escape(text[:500])}"
+    card = await msg.reply_text(
+        f"🤫 <b>PRIVATE WHISPER</b>\n\n"
+        f"👤 To: @{html.escape(recipient_username or recipient_name)}\n"
+        f"📦 Type: <b>{kind}</b>\n"
+        f"🔐 The actual content is hidden. Forward this card to a group."
+        f"{preview}\n\n"
+        f"🆔 <code>{wid}</code>",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    await mongo.whispers.update_one(
+        {"whisper_id": wid}, {"$set": {"public_message_id": card.message_id}}
+    )
+    return wid
+
+async def whisper_dm_handler(update, context):
+    """Build a forwardable whisper from the bot DM using @Bot @Person syntax.
+
+    Supported flow:
+      @BotUsername @PersonUsername          -> selects the recipient
+      [next message: media]                 -> creates a media whisper card
+      @BotUsername @PersonUsername hello     -> creates a text whisper card
+      @BotUsername @PersonUsername [media]   -> creates a media whisper card
+    """
+    msg = update.effective_message
+    if not msg or not update.effective_user or update.effective_user.is_bot:
+        return
+    if msg.chat.type != ChatType.PRIVATE:
+        return
+
+    # Do not interfere with commands handled by CommandHandler.
+    if msg.text and msg.text.startswith("/"):
+        return
+
+    text = msg.text or msg.caption or ""
+    media = _media_payload(msg)
+
+    # First, consume a pending DM target. This is what allows the user to send
+    # the media as a separate message after '@Bot @Person'.
+    pending = await mongo.whisper_sessions.find_one({
+        "chat_id": msg.chat.id,
+        "user_id": update.effective_user.id,
+        "scope": "dm_create",
+    })
+    if pending and (media or text):
+        expires = _as_utc(pending.get("expires_at"))
+        if expires and expires < _now():
+            await mongo.whisper_sessions.delete_one({"_id": pending["_id"]})
+            pending = None
+        else:
+            recipient_doc = await _resolve_global_username(pending.get("recipient_username"))
+            if not recipient_doc:
+                await mongo.whisper_sessions.delete_one({"_id": pending["_id"]})
+                await msg.reply_text("❌ I can't find that user yet. They must have started this bot or been seen by it before.")
+                return
+            await mongo.whisper_sessions.delete_one({"_id": pending["_id"]})
+            # A plain text message after target selection is treated as content;
+            # media captions are preserved as the media caption.
+            content = text if not media else (msg.caption or "")
+            await _create_dm_whisper(update, context, recipient_doc, content, media)
+            return
+
+    # Parse '@BotUsername @PersonUsername [optional text]'. The bot username is
+    # verified so ordinary DM text is left alone.
+    if not text:
+        return
+    parts = text.split(maxsplit=2)
+    if len(parts) < 2 or not parts[0].startswith("@") or not parts[1].startswith("@"):
+        return
+
+    me = await context.bot.get_me()
+    bot_username = (me.username or "").lower()
+    if parts[0][1:].lower() != bot_username:
+        return
+
+    target_username = parts[1][1:].strip()
+    if not target_username:
+        await msg.reply_text("❌ Please provide the person's @username.")
+        return
+
+    recipient_doc = await _resolve_global_username(target_username)
+    if not recipient_doc:
+        await msg.reply_text(
+            f"❌ I don't know @{html.escape(target_username)} yet.\n\n"
+            "The person must start the bot in DM first, or the bot must have seen them in a group."
+        , parse_mode="HTML")
+        return
+
+    inline_text = parts[2].strip() if len(parts) > 2 else ""
+    if media or inline_text:
+        await _create_dm_whisper(update, context, recipient_doc, inline_text if not media else (msg.caption or ""), media)
+        return
+
+    # No content yet: remember the target for the next DM message/media.
+    await mongo.whisper_sessions.update_one(
+        {"chat_id": msg.chat.id, "user_id": update.effective_user.id, "scope": "dm_create"},
+        {"$set": {
+            "chat_id": msg.chat.id,
+            "user_id": update.effective_user.id,
+            "scope": "dm_create",
+            "recipient_username": target_username,
+            "expires_at": _now() + timedelta(minutes=10),
+        }},
+        upsert=True,
+    )
+    await msg.reply_text(
+        f"🎯 Whisper target set to <b>@{html.escape(target_username)}</b>.\n\n"
+        "Now send the photo, video, document, sticker, audio, voice, GIF or text you want to whisper.\n\n"
+        "I will create a protected card here. Forward that card to the group.",
+        parse_mode="HTML",
+    )
+
 async def whisper_command(update, context):
     msg = update.effective_message
     if not msg or msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP) or not msg.from_user:
@@ -211,114 +400,6 @@ async def whisper_command(update, context):
     await msg.reply_text("✅ Whisper created. Its content is hidden from the group.", quote=True)
 
 
-
-
-async def _create_dm_whisper_card(update, context, target_id, target_username, text="", media=None):
-    """Create a forwardable whisper card in the bot DM. Media is stored by
-    Telegram file_id and is NEVER included in the public/forwarded card."""
-    msg = update.effective_message
-    sender = update.effective_user
-    wid = _wid()
-    cid = _cid()
-    recipient_name = f"@{target_username}" if target_username else "User"
-    if target_id:
-        try:
-            chat = await context.bot.get_chat(target_id)
-            recipient_name = chat.full_name or (f"@{chat.username}" if chat.username else recipient_name)
-            target_username = chat.username or target_username
-        except Exception:
-            pass
-    item = {
-        "message_id": 1, "sender_id": sender.id,
-        "text": encrypt_text(text or ""), "created_at": _now(), "edited": False
-    }
-    if media:
-        item["media"] = media
-    doc = {
-        "whisper_id": wid, "conversation_id": cid, "chat_id": None,
-        "sender_id": sender.id, "recipient_id": int(target_id),
-        "sender_username": sender.username, "recipient_username": target_username,
-        "sender_name": sender.full_name, "recipient_name": recipient_name,
-        "anonymous": False, "messages": [item], "created_at": _now(),
-        "updated_at": _now(), "status": "active", "public_message_id": None,
-        "origin": "dm_forwardable"
-    }
-    await mongo.whispers.insert_one(doc)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
-                               [InlineKeyboardButton("💬 Reply", callback_data=f"ws:reply:{wid}"),
-                                InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")]])
-    if media and not text:
-        label = {"photo":"🖼️ Photo", "video":"🎥 Video", "document":"📄 Document",
-                 "audio":"🎵 Audio", "voice":"🎙️ Voice", "video_note":"📹 Video Note",
-                 "animation":"🎞️ GIF", "sticker":"😀 Sticker"}.get(media.get("type"), "📦 Media")
-        body = f"🤫 <b>PRIVATE WHISPER</b>\n\n👤 To: {html.escape(recipient_name)}\n📦 <b>{label}</b>\n\n🔐 Media is hidden. Only the recipient can open it.\n🆔 <code>{wid}</code>"
-    elif media:
-        body = f"🤫 <b>PRIVATE WHISPER</b>\n\n👤 To: {html.escape(recipient_name)}\n📦 <b>Message + media</b>\n\n{html.escape(text)}\n\n🔐 Media is hidden.\n🆔 <code>{wid}</code>"
-    else:
-        body = f"🤫 <b>PRIVATE WHISPER</b>\n\n👤 To: {html.escape(recipient_name)}\n\n{html.escape(text)}\n\n🆔 <code>{wid}</code>"
-    card = await msg.reply_text(body, parse_mode="HTML", reply_markup=kb)
-    await mongo.whispers.update_one({"whisper_id": wid}, {"$set": {"public_message_id": card.message_id}})
-    return wid
-
-async def dm_whisper_handler(update, context):
-    """DM-only creator for forwardable whispers.
-
-    Syntax: @BotUsername @PersonUsername [optional text]
-    If no content is included, the next media message becomes the whisper.
-    The generated DM card contains no actual media, so forwarding it to a
-    group reveals only the protected card.
-    """
-    msg = update.effective_message
-    user = update.effective_user
-    if not msg or not user or user.is_bot or msg.chat.type != ChatType.PRIVATE:
-        return
-    text = msg.text or msg.caption or ""
-    media = _media_payload(msg)
-    me = await context.bot.get_me()
-    bot_username = (me.username or "").lower()
-    parts = text.split(maxsplit=2) if text else []
-
-    # Start a whisper draft: @Bot @Target
-    if len(parts) >= 2 and parts[0].lstrip("@").lower() == bot_username and parts[1].startswith("@"):
-        target_username = parts[1][1:].strip()
-        if not target_username:
-            return
-        from database.mongo import users
-        import re
-        target_doc = await users.find_one({"username": {"$regex": f"^{re.escape(target_username)}$", "$options": "i"}})
-        if not target_doc or not target_doc.get("user_id"):
-            await msg.reply_text("❌ I don't know that user yet. Ask them to start this bot once, then try again.")
-            return
-        target_id = int(target_doc["user_id"])
-        if target_id == user.id:
-            await msg.reply_text("❌ You can't whisper to yourself.")
-            return
-        body = parts[2].strip() if len(parts) > 2 else ""
-        if media:
-            await _create_dm_whisper_card(update, context, target_id, target_username, body, media)
-            return
-        if body:
-            await _create_dm_whisper_card(update, context, target_id, target_username, body, None)
-            return
-        await mongo.whisper_sessions.update_one(
-            {"dm_user_id": user.id, "kind": "dm_create"},
-            {"$set": {"dm_user_id": user.id, "target_id": target_id, "target_username": target_username,
-                      "expires_at": _now()+timedelta(minutes=10), "kind": "dm_create"}}, upsert=True)
-        await msg.reply_text(f"🎯 Whisper target set to @{html.escape(target_username)}.\n\nNow send the photo, video, document, sticker, audio, voice, GIF, or text you want to whisper.\n\nThe bot will create a protected card here. Forward that card to the group; the actual media will stay hidden until the recipient opens it in DM.", parse_mode="HTML")
-        return
-
-    # If the user has an active DM target, the next message becomes the whisper.
-    session = await mongo.whisper_sessions.find_one({"dm_user_id": user.id, "kind": "dm_create"})
-    if not session:
-        return
-    expires = _as_utc(session.get("expires_at"))
-    if expires and expires < _now():
-        await mongo.whisper_sessions.delete_one({"_id": session["_id"]})
-        return
-    if not text and not media:
-        return
-    await mongo.whisper_sessions.delete_one({"_id": session["_id"]})
-    await _create_dm_whisper_card(update, context, int(session["target_id"]), session.get("target_username"), text, media)
 
 async def whisper_inline_query(update, context):
     """Create an inline whisper draft. The draft becomes a real group whisper
