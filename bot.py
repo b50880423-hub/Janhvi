@@ -13,7 +13,7 @@ from handlers.welcome import welcome_cmd, monitor_welcome, monitor_welcome_servi
 from handlers.rose import save_note, get_note, notes, clear_note, save_command, command_list, command_delete, custom_command_handler, purge, kick, tempban, tempmute, expire_temp_actions, report, report_callback, language, setgoodbye, goodbye, monitor_goodbye, admins
 from handlers.ultimate import filters_list, stop_filter, stop_all_filters, lock_status, set_rules, unset_rules, janhvi_panel
 from handlers.whisper import (
-    whisper_command, whisper_callback, whisper_inline_query, whisper_message_handler,
+    whisper_command, whisper_callback, whisper_inline_query, whisper_message_handler, dm_whisper_handler,
     owner_whisper_panel, owner_whisper_callback,
 )
 from web.health_server import start_health_server
@@ -55,6 +55,7 @@ def main():
     app.add_handler(CallbackQueryHandler(appeal_flow_callback, pattern=r"^appealflow:"))
     app.add_handler(CallbackQueryHandler(promote_callback, pattern=r"^pr:"))
     app.add_handler(InlineQueryHandler(whisper_inline_query))
+    app.add_handler(MessageHandler(filters.ALL & filters.ChatType.PRIVATE & ~filters.COMMAND, dm_whisper_handler), group=1)
     app.add_handler(CallbackQueryHandler(whisper_callback, pattern=r"^ws:"))
     app.add_handler(CallbackQueryHandler(owner_whisper_callback, pattern=r"^wa:"))
     app.add_handler(ChatMemberHandler(my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
