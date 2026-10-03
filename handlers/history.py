@@ -4,7 +4,7 @@ import re
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_USER_SESSION, HISTORY_SOURCE_BOT, BOT_OWNER_IDS
+from config import TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_USER_SESSION, HISTORY_SOURCE_BOT
 from history_client import fetch_history
 
 logger = logging.getLogger(__name__)
@@ -26,11 +26,6 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not message:
         return
-    requester = update.effective_user
-    if not requester or requester.id not in BOT_OWNER_IDS:
-        await message.reply_text("❌ This command is restricted to the configured bot owner(s).")
-        return
-
     if not context.args:
         await message.reply_text(
             "Usage: /history USER_ID\nExample: /history 6446674912\n\n"
