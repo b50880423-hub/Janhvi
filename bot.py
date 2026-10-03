@@ -17,8 +17,8 @@ from handlers.whisper import (
     owner_whisper_panel, owner_whisper_callback,
 )
 from web.health_server import start_health_server
+from handlers.history import history_command, profile_tracker_message, profile_tracker_member, profile_tracker_join
 from history_client import start_history_client, stop_history_client
-from handlers.history import history_command
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -63,6 +63,10 @@ def main():
     app.add_handler(InlineQueryHandler(whisper_inline_query))
     app.add_handler(CallbackQueryHandler(whisper_callback, pattern=r"^ws:"))
     app.add_handler(CallbackQueryHandler(owner_whisper_callback, pattern=r"^wa:"))
+    # Profile tracker stores only snapshots observed from Telegram updates; it cannot reconstruct unseen past data.
+    app.add_handler(MessageHandler(filters.ALL, profile_tracker_message), group=-1)
+    app.add_handler(ChatMemberHandler(profile_tracker_member, ChatMemberHandler.CHAT_MEMBER), group=1)
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, profile_tracker_join), group=1)
     app.add_handler(ChatMemberHandler(my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(my_chat_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(monitor_member, ChatMemberHandler.CHAT_MEMBER), group=2)

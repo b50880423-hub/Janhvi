@@ -27,17 +27,10 @@ Set BOT_TOKEN, MONGO_URI and MONGO_DB in Heroku config vars. The Procfile runs `
 - Cleaned the /janhvi handler naming
 
 
-## Optional: Telegram name-history lookup
+## Profile history tracker
 
-The `/history USER_ID` command asks the configured history-source bot on demand and relays its text reply into this bot's chat. It does not automatically collect profile changes. Telegram does not provide a public API for all historical names; results depend on the external source's records, privacy settings, and quotas.
+`/history USER_ID` or `/history @username` shows profile snapshots this bot has observed and, when configured, asks the configured third-party history source for older records. Source responses are cached in MongoDB so they remain available after redeployments. Third-party access, historical coverage, and quotas are controlled by that source; this bot cannot recover names Telegram never exposed to it.
 
-This integration uses a separately authenticated Telegram user session because bot accounts cannot message other bots. Configure these Heroku Config Vars:
+The tracker stores a snapshot when a user sends a message to the bot or appears in supported group updates. It records a new row only when the observed display name or username changes. This is not retroactive: local history begins when the bot first observes a profile. Display-name search only searches locally observed profiles and names are not unique.
 
-- `API_ID` and `API_HASH` from https://my.telegram.org/apps (the `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` aliases also work)
-- `SESSION_STRING` generated locally with `python generate_history_session.py` after installing `requirements.txt` (the `TELEGRAM_USER_SESSION` alias also works)
-- `BOT_OWNER_IDS` with your numeric Telegram user ID(s), comma-separated; only these owners can run `/history`
-- `HISTORY_SOURCE_BOT` (defaults to `sangmata_bot`)
-
-Keep `TELEGRAM_USER_SESSION` private. It grants access to the Telegram account used to create it. Do not commit it to GitHub or share it. Use an account you control, follow the source bot's rules and quota, and disable the integration by clearing these three config vars.
-
-Example: `/history 6446674912`. The account used for the session must be able to open and message the configured history bot.
+Optional external backfill requires `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_USER_SESSION`, and `HISTORY_SOURCE_BOT`. Generate the session locally using `python generate_history_session.py`. Keep the session secret; it grants access to the Telegram account. If the source quota is exhausted, local tracking and previously cached reports still work.
