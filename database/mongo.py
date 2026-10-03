@@ -13,9 +13,11 @@ welcome_configs = None
 notes = None
 custom_commands = None
 temp_actions = None
+profile_history = None
+external_history_reports = None
 
 async def connect_db():
-    global client, db, groups, users, violations, events, whispers, whisper_sessions, mute_records, appeals, welcome_configs, notes, custom_commands, temp_actions
+    global client, db, groups, users, violations, events, whispers, whisper_sessions, mute_records, appeals, welcome_configs, notes, custom_commands, temp_actions, profile_history, external_history_reports
     if not MONGO_URI:
         raise RuntimeError("MONGO_URI is missing")
     client = AsyncIOMotorClient(MONGO_URI, serverSelectionTimeoutMS=10000)
@@ -31,6 +33,8 @@ async def connect_db():
     notes = db.notes
     custom_commands = db.custom_commands
     temp_actions = db.temp_actions
+    profile_history = db.profile_history
+    external_history_reports = db.external_history_reports
     mute_records = db.mute_records
     appeals = db.appeals
 
@@ -54,6 +58,10 @@ async def connect_db():
     await temp_actions.create_index("until")
     await mute_records.create_index([("chat_id", 1), ("user_id", 1)])
     await appeals.create_index([("chat_id", 1), ("user_id", 1), ("status", 1)])
+    await profile_history.create_index([("user_id", 1), ("observed_at", -1)])
+    await profile_history.create_index([("username_lower", 1), ("observed_at", -1)])
+    await profile_history.create_index([("full_name_lower", 1), ("observed_at", -1)])
+    await external_history_reports.create_index("user_id", unique=True)
 
 async def get_group(chat_id, defaults):
     doc = await groups.find_one({"chat_id": chat_id})
@@ -190,6 +198,8 @@ async def get_welcome_config(chat_id):
     notes = db.notes
     custom_commands = db.custom_commands
     temp_actions = db.temp_actions
+    profile_history = db.profile_history
+    external_history_reports = db.external_history_reports
     doc = await welcome_configs.find_one({"chat_id": chat_id})
     if not doc:
         return None
@@ -208,6 +218,8 @@ async def update_welcome_config(chat_id, data):
     notes = db.notes
     custom_commands = db.custom_commands
     temp_actions = db.temp_actions
+    profile_history = db.profile_history
+    external_history_reports = db.external_history_reports
     await welcome_configs.update_one({"chat_id": chat_id}, {"$set": {"chat_id": chat_id, **data}}, upsert=True)
 
 async def delete_welcome_config(chat_id):
