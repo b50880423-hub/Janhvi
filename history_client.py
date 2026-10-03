@@ -5,6 +5,7 @@ history-source bot only when a user invokes /history.
 """
 import asyncio
 import logging
+import re
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -58,8 +59,14 @@ async def stop_history_client():
         client = None
 
 
-async def fetch_history(target_id: str) -> list[str]:
-    """Ask the external history bot and return text messages it sends back."""
+async def fetch_history(target: str) -> list[str]:
+    """Ask the external history bot and return text messages it sends back.
+
+    Numeric IDs are sent as-is. @usernames are resolved to a numeric ID using
+    the authenticated Telegram account when possible. Plain display names are
+    forwarded as a best-effort query because Telegram does not offer a reliable
+    global lookup by display name, and names are not unique.
+    """
     if client is None or not client.is_connected():
         raise RuntimeError(client_error or "History client is not connected.")
 
@@ -69,8 +76,23 @@ async def fetch_history(target_id: str) -> list[str]:
         setattr(fetch_history, "_lock", lock)
 
     async with lock:
+        query = target.strip()
+        if re.fullmatch(r"\d{4,20}", query):
+            source_query = query
+        elif re.fullmatch(r"@?[A-Za-z][A-Za-z0-9_]{4,31}", query):
+            username = query.lstrip("@")
+            try:
+                entity = await client.get_entity(username)
+                source_query = str(entity.id)
+            except Exception:
+                # The source may accept usernames directly; let it try.
+                source_query = "@" + username
+        else:
+            # Best effort only: the external source must implement name search.
+            source_query = query
+
         async with client.conversation(HISTORY_SOURCE_BOT, timeout=55, exclusive=True) as conv:
-            await conv.send_message(target_id)
+            await conv.send_message(source_query)
             try:
                 first = await conv.get_response(timeout=45)
             except asyncio.TimeoutError as exc:
