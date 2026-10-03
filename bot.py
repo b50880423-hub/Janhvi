@@ -3,7 +3,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from config import BOT_TOKEN
 from database.mongo import connect_db
 from handlers.start import start
-from handlers.history import history_lookup
 from handlers.admin import (
     settings, help_cmd, warn, mute, unmute, whitelist, unwhitelist, blacklist, unblacklist,
     userinfo, warnings, resetwarnings, lock, unlock, filter_cmd, antispam, logs, badwords_cmd, smartstatus, setlimit, my_chat_member, trust, untrust, silentmode, threatlevel, lockdown, unlockdown, nsfwstickers, member_profile, security, mode, domain_cmd, reviewqueue, appeal, appeal_flow_callback, appeal_reason_message, promote, promote_callback, demote, ban, unban, case_cmd, userhistory, evidence, setlog, removelog, logstatus, rules, rules_callback
@@ -18,21 +17,27 @@ from handlers.whisper import (
     owner_whisper_panel, owner_whisper_callback,
 )
 from web.health_server import start_health_server
+from history_client import start_history_client, stop_history_client
+from handlers.history import history_command
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 async def post_init(app):
     await connect_db()
+    await start_history_client()
     if app.job_queue:
         app.job_queue.run_repeating(expire_temp_actions, interval=30, first=10, name="janhvi-temp-expiry")
+
+async def post_shutdown(app):
+    await stop_history_client()
 
 def main():
     start_health_server()
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is missing")
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     commands = {
-        "start": start, "help": help_cmd, "history": history_lookup, "panel": janhvi_panel, "welcome": welcome_cmd, "settings": settings, "rules": rules, "rule": rules, "setrules": set_rules, "clearrules": unset_rules, "appeal": appeal, "apeal": appeal,
+        "start": start, "help": help_cmd, "history": history_command, "panel": janhvi_panel, "welcome": welcome_cmd, "settings": settings, "rules": rules, "rule": rules, "setrules": set_rules, "clearrules": unset_rules, "appeal": appeal, "apeal": appeal,
         "warn": warn, "mute": mute, "unmute": unmute, "ban": ban, "unban": unban, "case": case_cmd, "cases": userhistory, "userhistory": userhistory, "evidence": evidence, "setlog": setlog, "removelog": removelog, "logstatus": logstatus,
         "whitelist": whitelist, "unwhitelist": unwhitelist,
         "blacklist": blacklist, "unblacklist": unblacklist,

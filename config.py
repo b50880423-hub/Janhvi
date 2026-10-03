@@ -1,6 +1,16 @@
 import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# Optional user-client session used only when /history is requested.
+TELEGRAM_API_ID = os.getenv("TELEGRAM_API_ID") or os.getenv("API_ID", "")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH") or os.getenv("API_HASH", "")
+TELEGRAM_USER_SESSION = os.getenv("TELEGRAM_USER_SESSION") or os.getenv("SESSION_STRING", "")
+BOT_OWNER_IDS = {
+    int(value.strip())
+    for value in os.getenv("BOT_OWNER_IDS", "").split(",")
+    if value.strip().isdigit()
+}
+HISTORY_SOURCE_BOT = os.getenv("HISTORY_SOURCE_BOT", "sangmata_bot")
 MONGO_URI = os.getenv("MONGO_URI", "")
 MONGO_DB = os.getenv("MONGO_DB", "antispam_bot")
 LOGGER_CHAT_ID = int(os.getenv("LOGGER_CHAT_ID", "0") or 0)
