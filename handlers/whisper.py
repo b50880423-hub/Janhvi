@@ -193,6 +193,41 @@ async def _create_dm_whisper(update, context, recipient_doc, text="", media=None
     await mongo.whispers.update_one(
         {"whisper_id": wid}, {"$set": {"public_message_id": card.message_id}}
     )
+
+    # Deliver a private notification to the intended recipient. Creating only
+    # the sender-side card is not enough for a real DM whisper workflow.
+    # Keep Whisper back hidden until the recipient opens the notification.
+    recipient_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
+        [InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")],
+    ])
+    sender_label = f"@{sender_username}" if sender_username else sender.full_name
+    try:
+        recipient_card = await context.bot.send_message(
+            chat_id=recipient_id,
+            text=(
+                "🤫 <b>YOU RECEIVED A PRIVATE WHISPER</b>\n\n"
+                f"👤 From: {html.escape(sender_label)}\n"
+                f"📦 Type: <b>{kind}</b>\n"
+                "🔐 Press Open Whisper to read it. The sender will see a read receipt.\n\n"
+                f"🆔 <code>{wid}</code>"
+            ),
+            parse_mode="HTML",
+            reply_markup=recipient_kb,
+        )
+        await mongo.whispers.update_one(
+            {"whisper_id": wid},
+            {"$set": {"recipient_message_id": recipient_card.message_id,
+                      "recipient_chat_id": recipient_id, "delivery_status": "sent"}},
+        )
+    except Exception as exc:
+        await mongo.whispers.update_one(
+            {"whisper_id": wid},
+            {"$set": {"delivery_status": "failed", "delivery_error": str(exc)[:300]}},
+        )
+        await msg.reply_text(
+            "⚠️ Whisper saved, but I couldn't notify the recipient. Ask them to open/start the bot in DM, then try again."
+        )
     return wid
 
 async def whisper_dm_handler(update, context):
@@ -216,6 +251,53 @@ async def whisper_dm_handler(update, context):
 
     text = msg.text or msg.caption or ""
     media = _media_payload(msg)
+
+    # Consume a one-tap reply session in the recipient's bot DM.
+    reply_session = await mongo.whisper_sessions.find_one({
+        "chat_id": msg.chat.id, "user_id": update.effective_user.id,
+        "scope": "reply",
+    })
+    if reply_session and (text or media):
+        expires = _as_utc(reply_session.get("expires_at"))
+        if expires and expires < _now():
+            await mongo.whisper_sessions.delete_one({"_id": reply_session["_id"]})
+            await msg.reply_text("⌛ Whisper reply expired. Press Whisper back again to reply.")
+            return
+        doc = await mongo.whispers.find_one({"whisper_id": reply_session.get("whisper_id")})
+        await mongo.whisper_sessions.delete_one({"_id": reply_session["_id"]})
+        if not doc or update.effective_user.id not in (doc.get("sender_id"), doc.get("recipient_id")):
+            await msg.reply_text("❌ This whisper conversation is no longer available.")
+            return
+        other_id = int(doc["sender_id"] if update.effective_user.id == doc["recipient_id"] else doc["recipient_id"])
+        item = {
+            "message_id": len(doc.get("messages", [])) + 1,
+            "sender_id": update.effective_user.id,
+            "text": encrypt_text(text if not media else (msg.caption or "")),
+            "created_at": _now(), "edited": False,
+        }
+        if media:
+            item["media"] = media
+        await mongo.whispers.update_one(
+            {"whisper_id": doc["whisper_id"]},
+            {"$push": {"messages": item}, "$set": {"updated_at": _now()}},
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{doc['whisper_id']}")],
+            [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{doc['whisper_id']}")],
+        ])
+        try:
+            await context.bot.send_message(
+                chat_id=other_id,
+                text=("💬 <b>NEW PRIVATE WHISPER REPLY</b>\n\n"
+                      f"From: {html.escape(update.effective_user.full_name)}\n"
+                      "Press Open Whisper to read the new reply.\n"
+                      f"🆔 <code>{doc['whisper_id']}</code>"),
+                parse_mode="HTML", reply_markup=kb,
+            )
+            await msg.reply_text("✅ Your private reply was sent.")
+        except Exception:
+            await msg.reply_text("⚠️ Reply saved, but I couldn't notify the other user. They may need to start the bot in DM.")
+        return
 
     # First, consume a pending DM target. This is what allows the user to send
     # the media as a separate message after '@Bot @Person'.
@@ -311,15 +393,28 @@ async def whisper_command(update, context):
     else:
         raw_text = msg.text or msg.caption or ""
         parts = raw_text.split(maxsplit=2)
-        if len(parts) < 2:
-            await msg.reply_text(
-                "🤫 Usage: <code>/whisper @username message</code>\n"
-                "Or reply to a user's message with <code>/whisper message</code>.\n\n"
-                "You can also whisper photos, videos, documents, audio, voice, GIFs and stickers.",
-                parse_mode="HTML"
-            )
-            return
-        raw = parts[1]
+        # Also accept the same @BotUsername @PersonUsername message syntax in groups.
+        # The bot mention must match this bot, so normal group chat is unaffected.
+        if parts and parts[0].startswith("@") and len(parts) >= 2 and parts[1].startswith("@"):
+            me = await context.bot.get_me()
+            if parts[0][1:].lower() != (me.username or "").lower():
+                return
+            if len(parts) < 3:
+                await msg.reply_text("✍️ Use <code>@BotUsername @PersonUsername your message</code>.", parse_mode="HTML")
+                return
+            raw = parts[1]
+            text = parts[2].strip()
+        else:
+            if len(parts) < 2:
+                await msg.reply_text(
+                    "🤫 Usage: <code>/whisper @username message</code>\n"
+                    "Or reply to a user's message with <code>/whisper message</code>.\n"
+                    "You can also use <code>@BotUsername @PersonUsername message</code> in the group.\n\n"
+                    "You can also whisper photos, videos, documents, audio, voice, GIFs and stickers.",
+                    parse_mode="HTML"
+                )
+                return
+            raw = parts[1]
         if raw.startswith("@"):
             from database.mongo import users
             doc = await users.find_one({"chat_id": msg.chat.id, "username": {"$regex": f"^{raw[1:]}$", "$options": "i"}})
@@ -335,7 +430,8 @@ async def whisper_command(update, context):
         else:
             await msg.reply_text("❌ Invalid target. Use @username or reply to their message.")
             return
-        text = parts[2].strip() if len(parts) > 2 else ""
+        if not (parts and parts[0].startswith("@") and len(parts) >= 2 and parts[1].startswith("@")):
+            text = parts[2].strip() if len(parts) > 2 else ""
 
     if not text and not media:
         await msg.reply_text("✍️ Add a message or attach a photo, video, document, audio, voice, GIF or sticker.")
@@ -397,6 +493,26 @@ async def whisper_command(update, context):
         parse_mode="HTML", reply_markup=kb
     )
     await mongo.whispers.update_one({"whisper_id": wid}, {"$set": {"public_message_id": card.message_id}})
+    # Notify the recipient in private as well as leaving the protected card in the group.
+    # Whisper back appears only after the recipient opens/reads the whisper.
+    recipient_kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
+        [InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")],
+    ])
+    try:
+        await context.bot.send_message(
+            chat_id=recipient_id,
+            text=("🤫 <b>YOU RECEIVED A PRIVATE WHISPER</b>\n\n"
+                  f"👤 From: {html.escape(msg.from_user.full_name)}\n"
+                  f"📦 Type: <b>{kind_label}</b>\n"
+                  "Press Open Whisper to read it privately. You can reply with one tap.\n\n"
+                  f"🆔 <code>{wid}</code>"),
+            parse_mode="HTML", reply_markup=recipient_kb,
+        )
+        await mongo.whispers.update_one({"whisper_id": wid}, {"$set": {"delivery_status": "sent"}})
+    except Exception as exc:
+        await mongo.whispers.update_one({"whisper_id": wid}, {"$set": {"delivery_status": "failed", "delivery_error": str(exc)[:300]}})
+        await msg.reply_text("⚠️ Whisper card created, but I couldn't DM the recipient. They must open/start Janhvi in private chat first.")
     await msg.reply_text("✅ Whisper created. Its content is hidden from the group.", quote=True)
 
 
@@ -497,10 +613,14 @@ async def _mark_whisper_read(doc, query):
     marker = f"👁️ Read by {html.escape(reader.full_name)}"
     if marker not in base:
         base = base.rstrip() + "\n\n" + marker
+    # Once opened, turn the notification into a read receipt and reveal the
+    # one-tap reply action. The recipient can press Whisper back and type their
+    # reply right in this bot DM; no username or ID is needed.
+    if "👁️ Whisper is read" not in base:
+        base = base.rstrip() + "\n\n👁️ <b>Whisper is read</b>"
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{doc['whisper_id']}")],
-        [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{doc['whisper_id']}"),
-         InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{doc['whisper_id']}")],
+        [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{doc['whisper_id']}")],
+        [InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{doc['whisper_id']}")],
     ])
     try:
         if message.text is not None:
@@ -509,6 +629,30 @@ async def _mark_whisper_read(doc, query):
             await message.edit_caption(base, parse_mode="HTML", reply_markup=kb)
     except Exception:
         # The read receipt is saved even if Telegram disallows editing the card.
+        pass
+
+    # If this was opened from the recipient's DM notification, update the
+    # original group card too, so the sender can see the read receipt.
+    try:
+        group_chat_id = int(doc.get("chat_id") or 0)
+        public_message_id = doc.get("public_message_id")
+        if group_chat_id and public_message_id and message.chat.id != group_chat_id:
+            group_text = (
+                "🤫 <b>PRIVATE WHISPER</b>\n\n"
+                f"👤 To: {html.escape(doc.get('recipient_name') or 'User')}\n"
+                "🔐 Only the sender and recipient can open this whisper.\n\n"
+                f"👁️ Whisper is read by {html.escape(reader.full_name)}\n"
+                f"🆔 <code>{doc['whisper_id']}</code>"
+            )
+            group_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{doc['whisper_id']}")],
+                [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{doc['whisper_id']}")],
+            ])
+            await query.get_bot().edit_message_text(
+                chat_id=group_chat_id, message_id=public_message_id,
+                text=group_text, parse_mode="HTML", reply_markup=group_kb,
+            )
+    except Exception:
         pass
 
 
@@ -607,13 +751,28 @@ async def whisper_callback(update, context):
             upsert=True
         )
         await q.answer("Reply mode enabled for 5 minutes.", show_alert=True)
-        await context.bot.send_message(uid, f"💬 Reply mode is ready for whisper <code>{wid}</code>.\nSend your next message in the group where you pressed the button. Janhvi will send it privately to the original sender as a protected whisper.", parse_mode="HTML")
+        if q.message.chat.type == ChatType.PRIVATE:
+            prompt = (f"💬 <b>Whisper back is ready</b> for <code>{wid}</code>.\n\n"
+                      "Send your next text, photo, voice message, or other supported media right here in this bot chat. "
+                      "Janhvi will deliver it privately to the person who sent you the original whisper.")
+        else:
+            prompt = (f"💬 <b>Whisper back is ready</b> for <code>{wid}</code>.\n\n"
+                      "Send your next message in this group. Janhvi will deliver it privately to the person who sent you the original whisper.")
+        await context.bot.send_message(uid, prompt, parse_mode="HTML")
 
 async def whisper_message_handler(update, context):
     msg = update.effective_message
     if not msg or not msg.from_user or msg.from_user.is_bot or msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
     await remember_user(msg)
+    plain = (msg.text or msg.caption or "").strip()
+    if plain and not plain.startswith("/"):
+        pieces = plain.split(maxsplit=2)
+        if len(pieces) >= 2 and pieces[0].startswith("@") and pieces[1].startswith("@"):
+            me = await context.bot.get_me()
+            if pieces[0][1:].lower() == (me.username or "").lower():
+                await whisper_command(update, context)
+                return
     session = await mongo.whisper_sessions.find_one({"chat_id": msg.chat.id, "user_id": msg.from_user.id})
     if not session:
         return
@@ -640,6 +799,18 @@ async def whisper_message_handler(update, context):
                                [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{doc['whisper_id']}"),
                                 InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{doc['whisper_id']}")]])
     await msg.reply_text("💬 <b>PRIVATE WHISPER REPLY</b>\n\n🔐 Only the conversation participants can open this conversation.\n🆔 <code>"+doc["whisper_id"]+"</code>", parse_mode="HTML", reply_markup=kb)
+    other_id = int(doc["sender_id"] if msg.from_user.id == doc["recipient_id"] else doc["recipient_id"])
+    try:
+        await context.bot.send_message(
+            chat_id=other_id,
+            text=("💬 <b>NEW PRIVATE WHISPER REPLY</b>\n\n"
+                  f"From: {html.escape(msg.from_user.full_name)}\n"
+                  "Press Open Conversation to read it, or Whisper back to reply.\n\n"
+                  f"🆔 <code>{doc['whisper_id']}</code>"),
+            parse_mode="HTML", reply_markup=kb,
+        )
+    except Exception:
+        pass
 
 
 async def owner_whisper_panel(update, context):
