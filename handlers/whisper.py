@@ -174,7 +174,7 @@ async def _create_dm_whisper(update, context, recipient_doc, text="", media=None
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
-        [InlineKeyboardButton("💬 Reply", callback_data=f"ws:reply:{wid}"),
+        [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{wid}"),
          InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")],
     ])
     preview = ""
@@ -386,7 +386,7 @@ async def whisper_command(update, context):
     kind_label = "Media" if media and not text else "Message + media" if media else "Message"
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
-        [InlineKeyboardButton("💬 Reply", callback_data=f"ws:reply:{wid}"), InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")]
+        [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{wid}"), InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")]
     ])
     card = await msg.reply_text(
         f"🤫 <b>PRIVATE WHISPER</b>\n\n"
@@ -478,6 +478,40 @@ def _as_utc(value):
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
 
+async def _mark_whisper_read(doc, query):
+    """Persist recipient read status and reflect it on the visible whisper card."""
+    reader = query.from_user
+    if not reader or reader.id != int(doc.get("recipient_id", 0)):
+        return
+    now = _now()
+    await mongo.whispers.update_one(
+        {"whisper_id": doc["whisper_id"]},
+        {"$addToSet": {"read_by": reader.id}, "$set": {"read_at": now}},
+    )
+    # Update the card the user actually clicked (forwarded cards have a different
+    # message_id from the original DM card stored in MongoDB).
+    message = query.message
+    if not message or not message.chat:
+        return
+    base = message.text or message.caption or "🤫 <b>PRIVATE WHISPER</b>"
+    marker = f"👁️ Read by {html.escape(reader.full_name)}"
+    if marker not in base:
+        base = base.rstrip() + "\n\n" + marker
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{doc['whisper_id']}")],
+        [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{doc['whisper_id']}"),
+         InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{doc['whisper_id']}")],
+    ])
+    try:
+        if message.text is not None:
+            await message.edit_text(base, parse_mode="HTML", reply_markup=kb)
+        elif message.caption is not None:
+            await message.edit_caption(base, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        # The read receipt is saved even if Telegram disallows editing the card.
+        pass
+
+
 async def whisper_callback(update, context):
     q = update.callback_query
     if not q or not q.data or not q.from_user:
@@ -544,6 +578,8 @@ async def whisper_callback(update, context):
     if uid not in (doc["sender_id"], doc["recipient_id"]):
         await q.answer("🚫 Access denied.", show_alert=True); return
     if parts[1] == "open":
+        # Record a visible read receipt only when the intended recipient opens it.
+        await _mark_whisper_read(doc, q)
         # Text can be shown in a native alert. Media cannot, so deliver the
         # stored Telegram file privately to the participant who pressed Open.
         messages = doc.get("messages", [])
@@ -563,13 +599,15 @@ async def whisper_callback(update, context):
         await q.answer(secret_text, show_alert=True)
         return
     if parts[1] == "reply":
+        reply_chat_id = q.message.chat.id
         await mongo.whisper_sessions.update_one(
-            {"chat_id": doc["chat_id"], "user_id": uid},
-            {"$set": {"whisper_id": wid, "expires_at": _now()+timedelta(minutes=5)}},
+            {"chat_id": reply_chat_id, "user_id": uid},
+            {"$set": {"chat_id": reply_chat_id, "user_id": uid, "whisper_id": wid,
+                      "scope": "reply", "expires_at": _now()+timedelta(minutes=5)}},
             upsert=True
         )
         await q.answer("Reply mode enabled for 5 minutes.", show_alert=True)
-        await context.bot.send_message(uid, f"💬 Send your reply to whisper <code>{wid}</code> now.\nIt will be posted as a protected whisper card in the group.", parse_mode="HTML")
+        await context.bot.send_message(uid, f"💬 Reply mode is ready for whisper <code>{wid}</code>.\nSend your next message in the group where you pressed the button. Janhvi will send it privately to the original sender as a protected whisper.", parse_mode="HTML")
 
 async def whisper_message_handler(update, context):
     msg = update.effective_message
@@ -599,7 +637,7 @@ async def whisper_message_handler(update, context):
         item["media"] = media
     await mongo.whispers.update_one({"whisper_id": doc["whisper_id"]}, {"$push": {"messages": item}, "$set": {"updated_at": _now()}})
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Open Conversation", callback_data=f"ws:open:{doc['whisper_id']}")],
-                               [InlineKeyboardButton("💬 Reply", callback_data=f"ws:reply:{doc['whisper_id']}"),
+                               [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{doc['whisper_id']}"),
                                 InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{doc['whisper_id']}")]])
     await msg.reply_text("💬 <b>PRIVATE WHISPER REPLY</b>\n\n🔐 Only the conversation participants can open this conversation.\n🆔 <code>"+doc["whisper_id"]+"</code>", parse_mode="HTML", reply_markup=kb)
 
