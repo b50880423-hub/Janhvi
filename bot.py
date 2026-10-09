@@ -10,7 +10,7 @@ from handlers.admin import (
 from handlers.callbacks import settings_callback, security_callback, review_callback, appeal_callback
 from handlers.moderation import moderate_message, monitor_member
 from handlers.welcome import welcome_cmd, monitor_welcome, monitor_welcome_service_message
-from handlers.rose import save_note, get_note, notes, clear_note, save_command, command_list, command_delete, custom_command_handler, purge, kick, tempban, tempmute, expire_temp_actions, report, report_callback, language, setgoodbye, goodbye, monitor_goodbye, admins
+from handlers.rose import save_note, get_note, notes, clear_note, save_command, command_list, command_delete, custom_command_handler, delete_message_command, purge, kick, tempban, tempmute, expire_temp_actions, report, report_callback, language, setgoodbye, goodbye, monitor_goodbye, admins
 from handlers.ultimate import filters_list, stop_filter, stop_all_filters, lock_status, set_rules, unset_rules, janhvi_panel
 from handlers.whisper import (
     whisper_command, whisper_callback, whisper_inline_query, whisper_message_handler, whisper_dm_handler,
@@ -48,7 +48,7 @@ def main():
         "security": security, "mode": mode, "domain": domain_cmd, "reviewqueue": reviewqueue,
         "promote": promote, "demote": demote,
         "save": save_note, "get": get_note, "notes": notes, "clear": clear_note, "command": save_command, "commands": command_list, "delcommand": command_delete,
-        "purge": purge, "kick": kick, "tempban": tempban, "tempmute": tempmute, "report": report, "language": language, "setgoodbye": setgoodbye, "goodbye": goodbye, "admins": admins, "id": userinfo,
+        "del": delete_message_command, "purge": purge, "kick": kick, "tempban": tempban, "tempmute": tempmute, "report": report, "language": language, "setgoodbye": setgoodbye, "goodbye": goodbye, "admins": admins, "id": userinfo,
         "trust": trust, "untrust": untrust, "silentmode": silentmode, "threatlevel": threatlevel, "lockdown": lockdown, "unlockdown": unlockdown, "nsfwstickers": nsfwstickers, "profile": member_profile,
     }
     for name, handler in commands.items(): app.add_handler(CommandHandler(name, handler))
