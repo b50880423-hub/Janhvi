@@ -138,7 +138,7 @@ async def custom_command_handler(update, context):
     m = re.match(r"^/([A-Za-z0-9_]{1,32})(?:@\w+)?(?:\s+.*)?$", msg.text.strip(), re.S)
     if not m: return
     name = m.group(1).lower()
-    if name in {"start","help","welcome","settings","rules","setrules","clearrules","panel","locks","filters","stop","stopall","rule","appeal","warn","mute","unmute","ban","unban","case","cases","userhistory","evidence","setlog","removelog","logstatus","whitelist","unwhitelist","blacklist","unblacklist","userinfo","id","warnings","resetwarnings","lock","unlock","filter","badwords","antispam","logs","smartstatus","setlimit","whisper","whisperowner","security","mode","domain","reviewqueue","promote","demote","trust","untrust","silentmode","threatlevel","lockdown","unlockdown","nsfwstickers","profile","save","get","notes","clear","command","commands","delcommand","purge","kick","tempban","tempmute","report","setgoodbye","goodbye","language","admins"}:
+    if name in {"start","help","welcome","settings","rules","setrules","clearrules","panel","locks","filters","stop","stopall","rule","appeal","warn","mute","unmute","ban","unban","case","cases","userhistory","evidence","setlog","removelog","logstatus","whitelist","unwhitelist","blacklist","unblacklist","userinfo","id","warnings","resetwarnings","lock","unlock","filter","badwords","antispam","logs","smartstatus","setlimit","whisper","whisperowner","security","mode","domain","reviewqueue","promote","demote","trust","untrust","silentmode","threatlevel","lockdown","unlockdown","nsfwstickers","profile","save","get","notes","clear","command","commands","delcommand","del","purge","kick","tempban","tempmute","report","setgoodbye","goodbye","language","admins"}:
         return
     doc = await mongo.custom_commands.find_one({"chat_id": update.effective_chat.id, "name": name})
     if not doc: return
@@ -151,6 +151,33 @@ async def custom_command_handler(update, context):
     else: await msg.reply_text(text or "(empty command)", parse_mode="HTML")
 
 # ---------------- Moderation extensions ----------------
+async def delete_message_command(update, context):
+    """Delete the specific message the admin replied to with /del."""
+    if not await _admin(update):
+        return await _deny(update)
+
+    command = update.effective_message
+    target = command.reply_to_message if command else None
+    if not target:
+        return await command.reply_text("Reply directly to the message you want to delete, then send /del.")
+
+    chat_id = update.effective_chat.id
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=target.message_id)
+    except Exception as exc:
+        return await command.reply_text(
+            "❌ I couldn't delete that message. Make sure I'm an admin with permission to delete messages; Telegram also restricts deleting messages older than 48 hours."
+        )
+
+    # Remove the /del command too, so the chat stays clean.
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=command.message_id)
+    except Exception:
+        pass
+
+    await _record(chat_id, "del", update.effective_user.id, update.effective_user.id,
+                  f"deleted message {target.message_id}")
+
 async def purge(update, context):
     """Delete every message from the replied-to message through the /purge command."""
     if not await _admin(update):
