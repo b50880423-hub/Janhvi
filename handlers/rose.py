@@ -152,20 +152,36 @@ async def custom_command_handler(update, context):
 
 # ---------------- Moderation extensions ----------------
 async def purge(update, context):
-    if not await _admin(update): return await _deny(update)
-    if not update.effective_message.reply_to_message:
-        return await update.effective_message.reply_text("Reply to the first message and use <code>/purge 20</code>.", parse_mode="HTML")
-    try: count = max(1, min(100, int(context.args[0]))) if context.args else 10
-    except ValueError: return await update.effective_message.reply_text("Usage: /purge <1-100>")
-    start = update.effective_message.reply_to_message.message_id
+    """Delete every message from the replied-to message through the /purge command."""
+    if not await _admin(update):
+        return await _deny(update)
+
+    command = update.effective_message
+    target = command.reply_to_message
+    if not target:
+        return await command.reply_text(
+            "Reply to the earliest message you want removed, then send /purge. "
+            "All messages from that message through your /purge command will be deleted."
+        )
+
+    # Telegram message IDs are sequential within a chat. Attempt each ID in the
+    # inclusive range; missing/service messages and messages the bot cannot delete
+    # are skipped. Telegram generally restricts deletion of messages older than 48h.
+    chat_id = update.effective_chat.id
+    start_id = target.message_id
+    end_id = command.message_id
     deleted = 0
-    for mid in range(start, start + count):
+    for message_id in range(start_id, end_id + 1):
         try:
-            await context.bot.delete_message(update.effective_chat.id, mid); deleted += 1
-        except Exception: pass
-    try: await update.effective_message.delete()
-    except Exception: pass
-    await _record(update.effective_chat.id, "purge", update.effective_user.id, update.effective_user.id, f"deleted {deleted}")
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            deleted += 1
+        except Exception:
+            continue
+
+    await _record(
+        chat_id, "purge", update.effective_user.id, update.effective_user.id,
+        f"deleted {deleted} messages from {start_id} through {end_id}"
+    )
 
 async def kick(update, context):
     if not await _admin(update): return await _deny(update)
