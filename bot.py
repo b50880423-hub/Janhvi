@@ -44,7 +44,7 @@ def main():
         "userinfo": userinfo, "warnings": warnings, "resetwarnings": resetwarnings,
         "lock": lock, "unlock": unlock, "locks": lock_status, "filter": filter_cmd, "filters": filters_list, "stop": stop_filter, "stopall": stop_all_filters, "badwords": badwords_cmd,
         "antispam": antispam, "logs": logs, "smartstatus": smartstatus, "setlimit": setlimit, "smartstatus": smartstatus, "setlimit": setlimit,
-        "whisper": whisper_command, "whisperowner": owner_whisper_panel,
+        "whisperowner": owner_whisper_panel,
         "security": security, "mode": mode, "domain": domain_cmd, "reviewqueue": reviewqueue,
         "promote": promote, "demote": demote,
         "save": save_note, "get": get_note, "notes": notes, "clear": clear_note, "command": save_command, "commands": command_list, "delcommand": command_delete,
