@@ -151,64 +151,150 @@ async def custom_command_handler(update, context):
     else: await msg.reply_text(text or "(empty command)", parse_mode="HTML")
 
 # ---------------- Moderation extensions ----------------
-async def delete_message_command(update, context):
-    """Delete the specific message the admin replied to with /del."""
-    if not await _admin(update):
-        return await _deny(update)
-
-    command = update.effective_message
-    target = command.reply_to_message if command else None
-    if not target:
-        return await command.reply_text("Reply directly to the message you want to delete, then send /del.")
-
-    chat_id = update.effective_chat.id
+async def _bot_can_delete_messages(update, context):
+    """Check Telegram's actual delete permission before attempting bulk actions."""
     try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=target.message_id)
-    except Exception as exc:
-        return await command.reply_text(
-            "❌ I couldn't delete that message. Make sure I'm an admin with permission to delete messages; Telegram also restricts deleting messages older than 48 hours."
+        me = await context.bot.get_me()
+        member = await context.bot.get_chat_member(update.effective_chat.id, me.id)
+        if member.status == ChatMemberStatus.OWNER:
+            return True
+        return member.status == ChatMemberStatus.ADMINISTRATOR and bool(
+            getattr(member, "can_delete_messages", False)
         )
-
-    # Remove the /del command too, so the chat stays clean.
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=command.message_id)
     except Exception:
-        pass
+        return False
 
-    await _record(chat_id, "del", update.effective_user.id, update.effective_user.id,
-                  f"deleted message {target.message_id}")
-
-async def purge(update, context):
-    """Delete every message from the replied-to message through the /purge command."""
-    if not await _admin(update):
-        return await _deny(update)
-
-    command = update.effective_message
-    target = command.reply_to_message
-    if not target:
-        return await command.reply_text(
-            "Reply to the earliest message you want removed, then send /purge. "
-            "All messages from that message through your /purge command will be deleted."
-        )
-
-    # Telegram message IDs are sequential within a chat. Attempt each ID in the
-    # inclusive range; missing/service messages and messages the bot cannot delete
-    # are skipped. Telegram generally restricts deletion of messages older than 48h.
-    chat_id = update.effective_chat.id
-    start_id = target.message_id
-    end_id = command.message_id
+async def _delete_ids(context, chat_id, start_id, end_id, *, max_count=500):
+    """Delete an inclusive Telegram message-ID range, skipping gaps/errors."""
     deleted = 0
-    for message_id in range(start_id, end_id + 1):
+    failed = 0
+    first = max(1, min(int(start_id), int(end_id)))
+    last = max(int(start_id), int(end_id))
+    if last - first + 1 > max_count:
+        first = last - max_count + 1
+    for message_id in range(first, last + 1):
         try:
             await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
             deleted += 1
         except Exception:
-            continue
+            failed += 1
+    return deleted, failed, first, last
 
-    await _record(
-        chat_id, "purge", update.effective_user.id, update.effective_user.id,
-        f"deleted {deleted} messages from {start_id} through {end_id}"
+async def delete_message_command(update, context):
+    """Delete one message by replying with /del, or by supplying its message ID."""
+    command = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not command or not chat or not user:
+        return
+
+    if chat.type not in ("group", "supergroup"):
+        return await command.reply_text("❌ Use /del inside the group where the message was sent.")
+
+    if not await _admin(update):
+        return await _deny(update)
+
+    # Check the bot's actual Telegram delete permission. Do not silently fail.
+    try:
+        me = await context.bot.get_me()
+        bot_member = await context.bot.get_chat_member(chat.id, me.id)
+        can_delete = (
+            bot_member.status == ChatMemberStatus.ADMINISTRATOR
+            and bool(getattr(bot_member, "can_delete_messages", False))
+        )
+    except Exception as exc:
+        return await command.reply_text(
+            f"❌ I couldn't verify my permissions ({type(exc).__name__}). "
+            "Make me an administrator with Delete Messages permission."
+        )
+    if not can_delete:
+        return await command.reply_text(
+            "❌ I need to be a group administrator with the <b>Delete Messages</b> permission.",
+            parse_mode="HTML",
+        )
+
+    target = command.reply_to_message
+    target_id = target.message_id if target else None
+    if target_id is None and context.args and context.args[0].isdigit():
+        target_id = int(context.args[0])
+    if target_id is None:
+        return await command.reply_text(
+            "Reply directly to the message you want removed with /del.\n"
+            "Alternatively, use /del <message_id>."
+        )
+    if target_id == command.message_id:
+        return await command.reply_text("❌ Reply to the target message, not to /del itself.")
+
+    try:
+        await context.bot.delete_message(chat_id=chat.id, message_id=target_id)
+    except Exception as exc:
+        # Give a useful diagnostic instead of swallowing Telegram's error.
+        detail = str(exc).replace("<", "&lt;").replace(">", "&gt;")
+        return await command.reply_text(
+            "❌ I couldn't delete that message. Check that it exists in this chat, "
+            "that I have Delete Messages permission, and that it is not older than 48 hours.\n"
+            f"<code>{detail[:300]}</code>",
+            parse_mode="HTML",
+        )
+
+    # Remove the command, then confirm so the admin knows it succeeded.
+    try:
+        await context.bot.delete_message(chat_id=chat.id, message_id=command.message_id)
+    except Exception:
+        pass
+    try:
+        await context.bot.send_message(chat_id=chat.id, text=f"✅ Deleted message {target_id}.")
+    except Exception:
+        pass
+    await _record(chat.id, "del", user.id, user.id, f"deleted message {target_id}")
+
+async def purge(update, context):
+    """Bulk-delete a replied range or the latest N message IDs, up to 500."""
+    if not await _admin(update):
+        return await _deny(update)
+    command = update.effective_message
+    chat_id = update.effective_chat.id
+    if not await _bot_can_delete_messages(update, context):
+        return await command.reply_text("❌ I need administrator permission to delete messages.")
+
+    target = command.reply_to_message
+    if target:
+        start_id, end_id = target.message_id, command.message_id
+        mode = "reply range"
+    elif context.args and context.args[0].isdigit():
+        count = int(context.args[0])
+        if count < 1 or count > 500:
+            return await command.reply_text("Choose a count between 1 and 500: /purge 50")
+        start_id, end_id = command.message_id - count, command.message_id - 1
+        mode = f"latest {count} messages"
+    else:
+        return await command.reply_text(
+            "🧹 <b>Advanced purge</b>\n"
+            "• Reply to the first message and send /purge to clear through this command.\n"
+            "• Use /purge 50 to attempt to delete the latest 50 messages.\n"
+            "Limit: 500 message IDs per command; unavailable or undeletable messages are skipped.",
+            parse_mode="HTML",
+        )
+
+    deleted, failed, first, last = await _delete_ids(
+        context, chat_id, start_id, end_id, max_count=500
     )
+    await _record(chat_id, "purge", update.effective_user.id, update.effective_user.id,
+                  f"{mode}; deleted={deleted}; failed={failed}; ids={first}-{last}")
+    # The command may already have been deleted as part of the range.
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=command.message_id)
+    except Exception:
+        pass
+    # Only send a result when failures occurred; otherwise keep the chat clean.
+    if failed:
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"🧹 Purge finished: {deleted} deleted, {failed} skipped.\nTelegram may block deletion of old messages or messages the bot cannot remove.",
+            )
+        except Exception:
+            pass
 
 async def kick(update, context):
     if not await _admin(update): return await _deny(update)
