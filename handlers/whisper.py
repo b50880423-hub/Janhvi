@@ -1,6 +1,6 @@
 import html, secrets
 from datetime import datetime, timezone, timedelta
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
 from telegram.constants import ChatType
 from database.mongo import get_user, upsert_user
 import database.mongo as mongo
@@ -595,80 +595,65 @@ def _as_utc(value):
     return value.astimezone(timezone.utc)
 
 async def _mark_whisper_read(doc, query):
-    """Persist read receipt and reliably reveal Whisper Back after recipient opens."""
+    """Persist recipient read status and reflect it on the visible whisper card."""
     reader = query.from_user
     if not reader or reader.id != int(doc.get("recipient_id", 0)):
         return
-
+    now = _now()
     await mongo.whispers.update_one(
         {"whisper_id": doc["whisper_id"]},
-        {"$addToSet": {"read_by": reader.id}, "$set": {"read_at": _now()}},
+        {"$addToSet": {"read_by": reader.id}, "$set": {"read_at": now}},
     )
-    wid = doc["whisper_id"]
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("↩️ Whisper Back", callback_data=f"ws:reply:{wid}")],
-        [InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")],
-    ])
+    # Update the card the user actually clicked (forwarded cards have a different
+    # message_id from the original DM card stored in MongoDB).
     message = query.message
-    bot = query.get_bot()
+    if not message or not message.chat:
+        return
+    base = message.text or message.caption or "🤫 <b>PRIVATE WHISPER</b>"
+    marker = f"👁️ Read by {html.escape(reader.full_name)}"
+    if marker not in base:
+        base = base.rstrip() + "\n\n" + marker
+    # Once opened, turn the notification into a read receipt and reveal the
+    # one-tap reply action. The recipient can press Whisper back and type their
+    # reply right in this bot DM; no username or ID is needed.
+    if "👁️ Whisper is read" not in base:
+        base = base.rstrip() + "\n\n👁️ <b>Whisper is read</b>"
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{doc['whisper_id']}")],
+        [InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{doc['whisper_id']}")],
+    ])
+    try:
+        if message.text is not None:
+            await message.edit_text(base, parse_mode="HTML", reply_markup=kb)
+        elif message.caption is not None:
+            await message.edit_caption(base, parse_mode="HTML", reply_markup=kb)
+    except Exception:
+        # The read receipt is saved even if Telegram disallows editing the card.
+        pass
 
-    # First update the keyboard separately: even if Telegram rejects a text edit,
-    # the obsolete Open Whisper button is still replaced with Whisper Back.
-    if message and message.chat:
-        try:
-            await message.edit_reply_markup(reply_markup=kb)
-        except Exception as exc:
-            print(f"[WHISPER] Could not update clicked card keyboard for {wid}: {exc}")
-        try:
-            base = message.text or message.caption or "🤫 PRIVATE WHISPER"
-            # Existing card text may contain HTML entities/tags; edit in plain text
-            # to avoid parse-entity failures that previously hid the read update.
-            plain = base.replace("<b>", "").replace("</b>", "").replace("<code>", "").replace("</code>", "")
-            if "Whisper is read" not in plain:
-                plain = plain.rstrip() + f"\n\n👁️ Whisper is read by {reader.full_name}"
-            if message.text is not None:
-                await message.edit_text(plain, reply_markup=kb, parse_mode=None)
-            elif message.caption is not None:
-                await message.edit_caption(plain, reply_markup=kb, parse_mode=None)
-        except Exception as exc:
-            print(f"[WHISPER] Could not update clicked card text for {wid}: {exc}")
-
-    # Update the original group card too, when the recipient opened the DM card.
-    group_chat_id = int(doc.get("chat_id") or 0)
-    public_message_id = doc.get("public_message_id")
-    if group_chat_id and public_message_id and (not message or message.chat.id != group_chat_id):
-        try:
+    # If this was opened from the recipient's DM notification, update the
+    # original group card too, so the sender can see the read receipt.
+    try:
+        group_chat_id = int(doc.get("chat_id") or 0)
+        public_message_id = doc.get("public_message_id")
+        if group_chat_id and public_message_id and message.chat.id != group_chat_id:
             group_text = (
-                "🤫 PRIVATE WHISPER\n\n"
-                f"👤 To: {doc.get('recipient_name') or 'User'}\n"
+                "🤫 <b>PRIVATE WHISPER</b>\n\n"
+                f"👤 To: {html.escape(doc.get('recipient_name') or 'User')}\n"
                 "🔐 Only the sender and recipient can open this whisper.\n\n"
-                f"👁️ Whisper is read by {reader.full_name}\n"
-                f"🆔 {wid}"
+                f"👁️ Whisper is read by {html.escape(reader.full_name)}\n"
+                f"🆔 <code>{doc['whisper_id']}</code>"
             )
             group_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("👁️ Whisper is read", callback_data=f"ws:open:{wid}")],
-                [InlineKeyboardButton("↩️ Whisper Back", callback_data=f"ws:reply:{wid}")],
+                [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{doc['whisper_id']}")],
+                [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{doc['whisper_id']}")],
             ])
-            await bot.edit_message_text(chat_id=group_chat_id, message_id=public_message_id,
-                                        text=group_text, reply_markup=group_kb, parse_mode=None)
-        except Exception as exc:
-            print(f"[WHISPER] Could not update original group card for {wid}: {exc}")
-
-    # If the button clicked was the group card, also update the saved recipient DM card.
-    recipient_chat_id = doc.get("recipient_chat_id")
-    recipient_message_id = doc.get("recipient_message_id")
-    if recipient_chat_id and recipient_message_id and (not message or message.chat.id != int(recipient_chat_id)):
-        try:
-            await bot.edit_message_text(
-                chat_id=int(recipient_chat_id), message_id=int(recipient_message_id),
-                text=("🤫 PRIVATE WHISPER\n\n"
-                      f"👤 From: {doc.get('sender_name') or 'User'}\n"
-                      "👁️ Whisper is read\n"
-                      f"🆔 {wid}"),
-                reply_markup=kb, parse_mode=None,
+            await query.get_bot().edit_message_text(
+                chat_id=group_chat_id, message_id=public_message_id,
+                text=group_text, parse_mode="HTML", reply_markup=group_kb,
             )
-        except Exception as exc:
-            print(f"[WHISPER] Could not update recipient DM card for {wid}: {exc}")
+    except Exception:
+        pass
 
 
 async def whisper_callback(update, context):
@@ -766,14 +751,35 @@ async def whisper_callback(update, context):
             upsert=True
         )
         await q.answer("Reply mode enabled for 5 minutes.", show_alert=True)
-        if q.message.chat.type == ChatType.PRIVATE:
-            prompt = (f"💬 <b>Whisper back is ready</b> for <code>{wid}</code>.\n\n"
-                      "Send your next text, photo, voice message, or other supported media right here in this bot chat. "
-                      "Janhvi will deliver it privately to the person who sent you the original whisper.")
-        else:
-            prompt = (f"💬 <b>Whisper back is ready</b> for <code>{wid}</code>.\n\n"
-                      "Send your next message in this group. Janhvi will deliver it privately to the person who sent you the original whisper.")
-        await context.bot.send_message(uid, prompt, parse_mode="HTML")
+        # Resolve the original sender's visible address for the reply prompt.
+        # Telegram bots cannot prefill a user's compose box from an inline-button
+        # callback; ForceReply gives the user a ready reply field instead.
+        other_id = int(doc["sender_id"] if uid == int(doc["recipient_id"]) else doc["recipient_id"])
+        other_username = None
+        try:
+            from database.mongo import users
+            user_row = await users.find_one({"user_id": other_id, "username": {"$exists": True, "$ne": None}})
+            if user_row:
+                other_username = user_row.get("username")
+        except Exception:
+            other_username = None
+        address = f"@{html.escape(other_username)}" if other_username else f"user ID <code>{other_id}</code>"
+        prompt = (f"💬 <b>Whisper Back</b> — replying to {address}\n\n"
+                  "Write your message as a reply to this prompt. Janhvi will deliver it privately; "
+                  "you do not need to type the username or ID.")
+        try:
+            await context.bot.send_message(
+                chat_id=q.message.chat.id, text=prompt, parse_mode="HTML",
+                reply_markup=ForceReply(selective=True, input_field_placeholder="Write your private reply…"),
+            )
+        except Exception as exc:
+            # Group replies may fail if the bot lacks permission; fall back to DM.
+            try:
+                await context.bot.send_message(chat_id=uid, text=prompt, parse_mode="HTML",
+                    reply_markup=ForceReply(selective=True, input_field_placeholder="Write your private reply…"))
+            except Exception:
+                logger = __import__("logging").getLogger(__name__)
+                logger.exception("Whisper Back prompt delivery failed: %s", exc)
 
 async def whisper_message_handler(update, context):
     msg = update.effective_message
