@@ -1,6 +1,6 @@
 import html, secrets
 from datetime import datetime, timezone, timedelta
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ForceReply
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatType
 from database.mongo import get_user, upsert_user
 import database.mongo as mongo
@@ -666,41 +666,92 @@ async def whisper_callback(update, context):
     wid = parts[2]
     uid = q.from_user.id
 
-    # IMPORTANT: inline messages do not have q.message. Handle them BEFORE
-    # checking q.message, otherwise Telegram keeps the button spinning.
+    # Inline-mode whispers have inline_message_id, not q.message. The
+    # original implementation only showed an alert and never edited the card.
     if parts[1] == "inline":
         pending = await mongo.whispers.find_one({"whisper_id": wid, "status": "pending_inline"})
         if not pending:
-            await q.answer("Invalid or expired whisper! Please create another one.", show_alert=True)
+            await q.answer("Invalid or expired whisper. Please create a new one.", show_alert=True)
             return
-
         expires_at = _as_utc(pending.get("expires_at"))
         if expires_at and expires_at < _now():
             await mongo.whispers.delete_one({"whisper_id": wid})
-            await q.answer("Whisper expired! Please create another one.", show_alert=True)
+            await q.answer("Whisper expired. Please create a new one.", show_alert=True)
             return
-
-        # Find the intended recipient by username. This is independent of the
-        # inline message's chat because callback queries for inline messages
-        # contain inline_message_id instead of message/chat.
         from database.mongo import users
         import re
         username = pending.get("recipient_username") or ""
         target_doc = await users.find_one({
-            "username": {"$regex": f"^{re.escape(username)}$", "$options": "i"}
+            "username": {"$regex": "^" + re.escape(username) + "$", "$options": "i"}
         })
         recipient_id = int(target_doc.get("user_id")) if target_doc and target_doc.get("user_id") else None
-
         if uid != int(pending.get("sender_id", 0)) and uid != recipient_id:
-            await q.answer("🔒 This whisper is not for you.", show_alert=True)
+            await q.answer("🔒 This whisper is only for the selected recipient.", show_alert=True)
+            return
+        if not recipient_id:
+            await q.answer("I couldn't identify the recipient. They must have interacted with the bot first.", show_alert=True)
             return
 
-        # Inline whisper content is already encrypted in MongoDB. Reveal it
-        # directly in Telegram's native callback alert; never open bot DM.
-        secret_text = decrypt_text(pending.get("text", "")) or "This whisper is empty."
-        if len(secret_text) > 195:
-            secret_text = secret_text[:192] + "…"
-        await q.answer(secret_text, show_alert=True)
+        is_recipient = uid == recipient_id
+        if is_recipient:
+            now = _now()
+            await mongo.whispers.update_one(
+                {"whisper_id": wid},
+                {"$set": {
+                    "status": "active", "chat_id": 0, "recipient_id": recipient_id,
+                    "recipient_name": q.from_user.full_name,
+                    "recipient_username": q.from_user.username,
+                    "read_at": now, "updated_at": now,
+                    "messages": [{
+                        "message_id": 1, "sender_id": int(pending["sender_id"]),
+                        "text": pending.get("text", ""), "created_at": pending.get("created_at", now),
+                        "edited": False
+                    }],
+                    "read_by": [recipient_id]
+                }}
+            )
+            secret_text = decrypt_text(pending.get("text", "")) or "This whisper is empty."
+            if len(secret_text) > 195:
+                secret_text = secret_text[:192] + "…"
+            # Inline keyboard buttons cannot edit a user's typing box. Use
+            # switch_inline_query_current_chat to prefill a reply target.
+            sender_username = pending.get("sender_username")
+            me = await context.bot.get_me()
+            target_query = f"@{sender_username} " if sender_username else f"@{pending['sender_id']} "
+            reply_button = InlineKeyboardButton(
+                "↩️ Whisper Back",
+                switch_inline_query_current_chat=target_query
+            )
+            new_kb = InlineKeyboardMarkup([[reply_button]])
+            try:
+                if q.inline_message_id:
+                    await context.bot.edit_message_text(
+                        inline_message_id=q.inline_message_id,
+                        text=(
+                            f"👁️ <b>WHISPER IS READ</b>\n"
+                            f"Only @{html.escape(username)} and the sender can access this whisper."
+                        ),
+                        parse_mode="HTML", reply_markup=new_kb
+                    )
+            except Exception as exc:
+                logger = __import__("logging").getLogger(__name__)
+                logger.exception("Failed to edit inline whisper read receipt: %s", exc)
+                await q.answer("Read, but Telegram couldn't update the card. Check bot logs.", show_alert=True)
+                return
+            await q.answer(secret_text, show_alert=True)
+            # Notify sender in DM, when possible, that recipient opened the whisper.
+            try:
+                await context.bot.send_message(
+                    chat_id=int(pending["sender_id"]),
+                    text=f"👁️ Your whisper to @{html.escape(username)} has been read.",
+                    parse_mode="HTML"
+                )
+            except Exception:
+                pass
+            return
+
+        # Sender may inspect the pending card but must not mark it read.
+        await q.answer("This whisper is waiting for the selected recipient to open it.", show_alert=True)
         return
 
     # Normal /whisper cards are regular group messages and therefore must have
@@ -751,49 +802,23 @@ async def whisper_callback(update, context):
             upsert=True
         )
         await q.answer("Reply mode enabled for 5 minutes.", show_alert=True)
-        # Resolve the original sender's visible address for the reply prompt.
-        # Telegram bots cannot prefill a user's compose box from an inline-button
-        # callback; ForceReply gives the user a ready reply field instead.
-        other_id = int(doc["sender_id"] if uid == int(doc["recipient_id"]) else doc["recipient_id"])
-        other_username = None
-        try:
-            from database.mongo import users
-            user_row = await users.find_one({"user_id": other_id, "username": {"$exists": True, "$ne": None}})
-            if user_row:
-                other_username = user_row.get("username")
-        except Exception:
-            other_username = None
-        address = f"@{html.escape(other_username)}" if other_username else f"user ID <code>{other_id}</code>"
-        prompt = (f"💬 <b>Whisper Back</b> — replying to {address}\n\n"
-                  "Write your message as a reply to this prompt. Janhvi will deliver it privately; "
-                  "you do not need to type the username or ID.")
-        try:
-            await context.bot.send_message(
-                chat_id=q.message.chat.id, text=prompt, parse_mode="HTML",
-                reply_markup=ForceReply(selective=True, input_field_placeholder="Write your private reply…"),
-            )
-        except Exception as exc:
-            # Group replies may fail if the bot lacks permission; fall back to DM.
-            try:
-                await context.bot.send_message(chat_id=uid, text=prompt, parse_mode="HTML",
-                    reply_markup=ForceReply(selective=True, input_field_placeholder="Write your private reply…"))
-            except Exception:
-                logger = __import__("logging").getLogger(__name__)
-                logger.exception("Whisper Back prompt delivery failed: %s", exc)
+        if q.message.chat.type == ChatType.PRIVATE:
+            prompt = (f"💬 <b>Whisper back is ready</b> for <code>{wid}</code>.\n\n"
+                      "Send your next text, photo, voice message, or other supported media right here in this bot chat. "
+                      "Janhvi will deliver it privately to the person who sent you the original whisper.")
+        else:
+            prompt = (f"💬 <b>Whisper back is ready</b> for <code>{wid}</code>.\n\n"
+                      "Send your next message in this group. Janhvi will deliver it privately to the person who sent you the original whisper.")
+        await context.bot.send_message(uid, prompt, parse_mode="HTML")
 
 async def whisper_message_handler(update, context):
     msg = update.effective_message
     if not msg or not msg.from_user or msg.from_user.is_bot or msg.chat.type not in (ChatType.GROUP, ChatType.SUPERGROUP):
         return
     await remember_user(msg)
-    plain = (msg.text or msg.caption or "").strip()
-    if plain and not plain.startswith("/"):
-        pieces = plain.split(maxsplit=2)
-        if len(pieces) >= 2 and pieces[0].startswith("@") and pieces[1].startswith("@"):
-            me = await context.bot.get_me()
-            if pieces[0][1:].lower() == (me.username or "").lower():
-                await whisper_command(update, context)
-                return
+    # Whisper creation is intentionally inline-only: users type
+    # @BotUsername in Telegram, then query "@recipientusername message".
+    # Do not turn ordinary group messages into /whisper commands.
     session = await mongo.whisper_sessions.find_one({"chat_id": msg.chat.id, "user_id": msg.from_user.id})
     if not session:
         return
