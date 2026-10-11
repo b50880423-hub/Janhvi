@@ -1,4 +1,5 @@
 import html, secrets
+from urllib.parse import quote
 from datetime import datetime, timezone, timedelta
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatType
@@ -172,8 +173,12 @@ async def _create_dm_whisper(update, context, recipient_doc, text="", media=None
            "Voice" if media and media.get("type") == "voice" else \
            "Video note" if media and media.get("type") == "video_note" else "Message"
 
+    bot_info = await context.bot.get_me()
+    deep_link = f"https://t.me/{bot_info.username}?start=whisper_{wid}"
+    share_url = "https://t.me/share/url?url=" + quote(deep_link, safe="") + "&text=" + quote("🤫 A private whisper is waiting for you. Open it in Janhvi.", safe="")
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
+        [InlineKeyboardButton("📤 Forward / Share Whisper", url=share_url)],
         [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{wid}"),
          InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")],
     ])
