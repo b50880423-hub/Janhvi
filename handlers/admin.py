@@ -61,6 +61,7 @@ async def help_cmd(update, context):
         "/command · /commands · /delcommand\n\n"
         "👑 <b>Administration</b>\n"
         "/admins · /promote · /demote · /settings\n"
+        "/atag [message] · /utag [message] (reply to any message to use it as the heading)\n"
         "/userinfo · /profile · /id · /panel\n\n"
         "🛡️ <b>Advanced Security</b>\n"
         "/security · /smartstatus · /setlimit · /mode\n"
