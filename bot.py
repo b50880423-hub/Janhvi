@@ -18,6 +18,7 @@ from handlers.whisper import (
 )
 from web.health_server import start_health_server
 from handlers.history import history_command, profile_tracker_message, profile_tracker_member, profile_tracker_join
+from handlers.tagging import atag, utag
 from history_client import start_history_client, stop_history_client
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
@@ -37,7 +38,7 @@ def main():
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN is missing")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
     commands = {
-        "start": start, "help": help_cmd, "history": history_command, "panel": janhvi_panel, "welcome": welcome_cmd, "settings": settings, "rules": rules, "rule": rules, "setrules": set_rules, "clearrules": unset_rules, "appeal": appeal, "apeal": appeal,
+        "start": start, "help": help_cmd, "atag": atag, "utag": utag, "history": history_command, "panel": janhvi_panel, "welcome": welcome_cmd, "settings": settings, "rules": rules, "rule": rules, "setrules": set_rules, "clearrules": unset_rules, "appeal": appeal, "apeal": appeal,
         "warn": warn, "mute": mute, "unmute": unmute, "ban": ban, "unban": unban, "case": case_cmd, "cases": userhistory, "userhistory": userhistory, "evidence": evidence, "setlog": setlog, "removelog": removelog, "logstatus": logstatus,
         "whitelist": whitelist, "unwhitelist": unwhitelist,
         "blacklist": blacklist, "unblacklist": unblacklist,
