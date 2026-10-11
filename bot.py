@@ -13,7 +13,7 @@ from handlers.welcome import welcome_cmd, monitor_welcome, monitor_welcome_servi
 from handlers.rose import save_note, get_note, notes, clear_note, save_command, command_list, command_delete, custom_command_handler, delete_message_command, purge, kick, tempban, tempmute, expire_temp_actions, report, report_callback, language, setgoodbye, goodbye, monitor_goodbye, admins
 from handlers.ultimate import filters_list, stop_filter, stop_all_filters, lock_status, set_rules, unset_rules, janhvi_panel
 from handlers.whisper import (
-    whisper_command, whisper_callback, whisper_inline_query, whisper_message_handler, whisper_dm_handler,
+    whisper_command, whisper_callback, whisper_inline_query, whisper_message_handler, whisper_dm_handler, create_whisper_command,
     owner_whisper_panel, owner_whisper_callback,
 )
 from web.health_server import start_health_server
@@ -45,7 +45,7 @@ def main():
         "userinfo": userinfo, "warnings": warnings, "resetwarnings": resetwarnings,
         "lock": lock, "unlock": unlock, "locks": lock_status, "filter": filter_cmd, "filters": filters_list, "stop": stop_filter, "stopall": stop_all_filters, "badwords": badwords_cmd,
         "antispam": antispam, "logs": logs, "smartstatus": smartstatus, "setlimit": setlimit, "smartstatus": smartstatus, "setlimit": setlimit,
-        "whisperowner": owner_whisper_panel,
+        "whisperowner": owner_whisper_panel, "create": create_whisper_command,
         "security": security, "mode": mode, "domain": domain_cmd, "reviewqueue": reviewqueue,
         "promote": promote, "demote": demote,
         "save": save_note, "get": get_note, "notes": notes, "clear": clear_note, "command": save_command, "commands": command_list, "delcommand": command_delete,
