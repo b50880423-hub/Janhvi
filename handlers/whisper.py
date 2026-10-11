@@ -888,10 +888,20 @@ async def whisper_callback(update, context):
     if not shared_open and uid not in (doc["sender_id"], doc["recipient_id"]):
         await q.answer("🚫 Access denied. Open the whisper using its shared link.", show_alert=True); return
     if parts[1] in ("open", "sharedopen"):
-        # Only the intended recipient marks the whisper as read; opening a shared
-        # link grants access but does not falsely mark the recipient's read receipt.
+        # Only the intended recipient marks the whisper as read.
+        already_read = uid in (doc.get("read_by") or [])
         if not shared_open:
             await _mark_whisper_read(doc, q)
+            if uid == int(doc.get("recipient_id", 0)) and not already_read and doc.get("source") == "dm_forwardable":
+                try:
+                    sender_label = ("@" + doc["recipient_username"]) if doc.get("recipient_username") else (doc.get("recipient_name") or "The recipient")
+                    await context.bot.send_message(
+                        chat_id=int(doc["sender_id"]),
+                        text=f"👁️ <b>YOUR WHISPER WAS READ</b>\n\n{html.escape(sender_label)} opened your private whisper.\n🆔 <code>{html.escape(wid)}</code>",
+                        parse_mode="HTML",
+                    )
+                except Exception:
+                    pass
         # Text can be shown in a native alert. Media cannot, so deliver the
         # stored Telegram file privately to the participant who pressed Open.
         messages = doc.get("messages", [])

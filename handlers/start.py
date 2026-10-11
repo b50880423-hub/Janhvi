@@ -14,9 +14,14 @@ async def start(update, context):
         if not doc:
             await update.effective_message.reply_text("⌛ This whisper is unavailable or has expired.")
             return
-        # A valid share link is an explicit invitation to view this whisper.
-        # Keep the ordinary Open Whisper callback participant-only; shared links
-        # get a separate callback that grants access to this shared card only.
+        # Keep whisper access restricted to the sender and intended recipient.
+        viewer_id = update.effective_user.id if update.effective_user else 0
+        if viewer_id not in (int(doc.get("sender_id", 0)), int(doc.get("recipient_id", 0))):
+            target = "@" + doc["recipient_username"] if doc.get("recipient_username") else (doc.get("recipient_name") or "the intended recipient")
+            await update.effective_message.reply_text(
+                f"🔒 This whisper is private and is only for {html.escape(target)}."
+            )
+            return
         sender_label = "@" + doc["sender_username"] if doc.get("sender_username") else (doc.get("sender_name") or "Someone")
         recipient_label = "@" + doc["recipient_username"] if doc.get("recipient_username") else (doc.get("recipient_name") or "User")
         me = await context.bot.get_me()
@@ -24,7 +29,7 @@ async def start(update, context):
         share_url = ("https://t.me/share/url?url=" + quote(deep_link, safe="")
                      + "&text=" + quote("🤫 A private whisper is waiting for you. Open it in Janhvi.", safe=""))
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:sharedopen:{wid}")],
+            [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
             [InlineKeyboardButton("📤 Forward / Share Whisper", url=share_url)],
             [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{wid}")],
         ])
