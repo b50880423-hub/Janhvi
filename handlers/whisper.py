@@ -796,6 +796,12 @@ async def whisper_callback(update, context):
             "username": {"$regex": "^" + re.escape(username) + "$", "$options": "i"}
         })
         recipient_id = int(target_doc.get("user_id")) if target_doc and target_doc.get("user_id") else None
+        # The intended recipient may press the inline button before their
+        # username has been recorded in MongoDB. Telegram gives us their real
+        # user ID in this callback, so safely resolve them by exact username.
+        pressing_username = (q.from_user.username or "").lstrip("@").lower()
+        if pressing_username and pressing_username == username.lower():
+            recipient_id = uid
         if uid != int(pending.get("sender_id", 0)) and uid != recipient_id:
             await q.answer("🔒 This whisper is only for the selected recipient.", show_alert=True)
             return
