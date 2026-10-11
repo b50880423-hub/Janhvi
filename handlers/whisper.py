@@ -17,6 +17,16 @@ def _wid():
 def _cid():
     return secrets.token_hex(8)
 
+async def _share_whisper_button(context, wid):
+    """Return a Telegram share button whose deep link recreates the whisper card."""
+    me = await context.bot.get_me()
+    deep_link = f"https://t.me/{me.username}?start=whisper_{wid}"
+    share_url = (
+        "https://t.me/share/url?url=" + quote(deep_link, safe="")
+        + "&text=" + quote("🤫 A private whisper is waiting for you. Open it in Janhvi.", safe="")
+    )
+    return InlineKeyboardButton("📤 Forward / Share Whisper", url=share_url)
+
 
 def _media_payload(msg):
     """Return a Telegram file_id/type for media that can be replayed privately."""
@@ -552,8 +562,10 @@ async def whisper_command(update, context):
     }
     await mongo.whispers.insert_one(doc)
     kind_label = "Media" if media and not text else "Message + media" if media else "Message"
+    share_button = await _share_whisper_button(context, wid)
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
+        [share_button],
         [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{wid}"), InlineKeyboardButton("🚫 Block", callback_data=f"ws:block:{wid}")]
     ])
     card = await msg.reply_text(
@@ -672,10 +684,26 @@ async def _mark_whisper_read(doc, query):
     if not reader or reader.id != int(doc.get("recipient_id", 0)):
         return
     now = _now()
+    first_read = not doc.get("read_at")
     await mongo.whispers.update_one(
         {"whisper_id": doc["whisper_id"]},
         {"$addToSet": {"read_by": reader.id}, "$set": {"read_at": now}},
     )
+    # Send a private read receipt to the sender's DM on the first recipient open.
+    # A sender who has never started the bot may not be reachable; the visible
+    # card and database read status still update in that case.
+    if first_read and int(doc.get("sender_id", 0)) != reader.id:
+        try:
+            sender_label = f"@{reader.username}" if reader.username else reader.full_name
+            await query.get_bot().send_message(
+                chat_id=int(doc["sender_id"]),
+                text=("👁️ <b>YOUR WHISPER WAS READ</b>\n\n"
+                      f"👤 Read by: {html.escape(sender_label)}\n"
+                      f"🆔 <code>{html.escape(doc['whisper_id'])}</code>"),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
     # Update the card the user actually clicked (forwarded cards have a different
     # message_id from the original DM card stored in MongoDB).
     message = query.message

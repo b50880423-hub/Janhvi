@@ -1,4 +1,5 @@
 import html
+from urllib.parse import quote
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatType
 import database.mongo as mongo
@@ -19,8 +20,15 @@ async def start(update, context):
             return
         sender_label = "@" + doc["sender_username"] if doc.get("sender_username") else (doc.get("sender_name") or "Someone")
         recipient_label = "@" + doc["recipient_username"] if doc.get("recipient_username") else (doc.get("recipient_name") or "User")
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
-                                   [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{wid}")]])
+        me = await context.bot.get_me()
+        deep_link = f"https://t.me/{me.username}?start=whisper_{wid}"
+        share_url = ("https://t.me/share/url?url=" + quote(deep_link, safe="")
+                     + "&text=" + quote("🤫 A private whisper is waiting for you. Open it in Janhvi.", safe=""))
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:open:{wid}")],
+            [InlineKeyboardButton("📤 Forward / Share Whisper", url=share_url)],
+            [InlineKeyboardButton("↩️ Whisper back", callback_data=f"ws:reply:{wid}")],
+        ])
         await update.effective_message.reply_text(
             "🤫 <b>PRIVATE WHISPER</b>\n\n"
             f"👤 From: {html.escape(sender_label)}\n"
