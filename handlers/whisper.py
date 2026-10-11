@@ -230,6 +230,31 @@ async def _create_dm_whisper(update, context, recipient_doc, text="", media=None
         )
     return wid
 
+
+async def create_whisper_command(update, context):
+    """Start the guided advanced whisper creation flow in the bot's private chat."""
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user or msg.chat.type != ChatType.PRIVATE:
+        if msg:
+            await msg.reply_text("Open me in private chat and use /create to prepare an advanced whisper.")
+        return
+    await mongo.whisper_sessions.update_one(
+        {"chat_id": msg.chat.id, "user_id": user.id, "scope": "advanced_create_target"},
+        {"$set": {"chat_id": msg.chat.id, "user_id": user.id,
+                  "scope": "advanced_create_target",
+                  "expires_at": _now() + timedelta(minutes=10)}},
+        upsert=True,
+    )
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Cancel", callback_data="ws:create_cancel:0")]])
+    await msg.reply_text(
+        "🤫 <b>ADVANCED WHISPER</b>\n\n"
+        "Step 1 of 2 — choose the recipient.\n"
+        "Send their @username (they must have started the bot or be known to it).\n\n"
+        "Next, send the text, photo, video, sticker, GIF, document, audio or voice message.",
+        parse_mode="HTML", reply_markup=kb,
+    )
+
 async def whisper_dm_handler(update, context):
     """Build a forwardable whisper from the bot DM using @Bot @Person syntax.
 
@@ -251,6 +276,48 @@ async def whisper_dm_handler(update, context):
 
     text = msg.text or msg.caption or ""
     media = _media_payload(msg)
+
+    # Guided /create flow: first message selects a recipient, next message is content.
+    target_session = await mongo.whisper_sessions.find_one({
+        "chat_id": msg.chat.id, "user_id": update.effective_user.id,
+        "scope": "advanced_create_target",
+    })
+    if target_session and text and not media:
+        expires = _as_utc(target_session.get("expires_at"))
+        await mongo.whisper_sessions.delete_one({"_id": target_session["_id"]})
+        if expires and expires < _now():
+            await msg.reply_text("⌛ This creation session expired. Start again with /create.")
+            return
+        target = text.strip().split()[0].lstrip("@")
+        if not target or target.startswith("/"):
+            await msg.reply_text("❌ Send a valid @username, or start again with /create.")
+            return
+        recipient_doc = await _resolve_global_username(target)
+        if not recipient_doc:
+            await msg.reply_text(
+                f"❌ I couldn't find @{html.escape(target)}. They must start the bot or be seen by it first.\n\n"
+                "Start again with /create when ready.", parse_mode="HTML")
+            return
+        if int(recipient_doc.get("user_id", 0)) == update.effective_user.id:
+            await msg.reply_text("❌ You can't whisper to yourself. Start again with /create.")
+            return
+        await mongo.whisper_sessions.update_one(
+            {"chat_id": msg.chat.id, "user_id": update.effective_user.id, "scope": "dm_create"},
+            {"$set": {"chat_id": msg.chat.id, "user_id": update.effective_user.id,
+                      "scope": "dm_create", "recipient_username": target,
+                      "expires_at": _now() + timedelta(minutes=10)}}, upsert=True)
+        await msg.reply_text(
+            f"🎯 Recipient selected: <b>@{html.escape(target)}</b>\n\n"
+            "Step 2 of 2 — now send the whisper content. You can send text or one media item with a caption.\n"
+            "Use /cancel to stop.", parse_mode="HTML")
+        return
+
+    # Cancel a guided creation session without consuming it as whisper content.
+    if text.strip() == "/cancel":
+        await mongo.whisper_sessions.delete_many({"chat_id": msg.chat.id, "user_id": update.effective_user.id,
+            "scope": {"$in": ["advanced_create_target", "dm_create"]}})
+        await msg.reply_text("✖️ Whisper creation cancelled.")
+        return
 
     # Consume a one-tap reply session in the recipient's bot DM.
     reply_session = await mongo.whisper_sessions.find_one({
@@ -662,6 +729,16 @@ async def whisper_callback(update, context):
         return
     parts = q.data.split(":")
     if len(parts) < 3 or parts[0] != "ws":
+        return
+    if parts[1] == "create_cancel":
+        await mongo.whisper_sessions.delete_many({"chat_id": q.message.chat.id,
+            "user_id": q.from_user.id,
+            "scope": {"$in": ["advanced_create_target", "dm_create"]}})
+        await q.answer("Creation cancelled")
+        try:
+            await q.edit_message_text("✖️ Advanced whisper creation cancelled.")
+        except Exception:
+            pass
         return
     wid = parts[2]
     uid = q.from_user.id
