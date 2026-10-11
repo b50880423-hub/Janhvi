@@ -653,17 +653,18 @@ async def whisper_inline_query(update, context):
 
     from telegram import InlineQueryResultArticle, InputTextMessageContent
 
+    # Match the polished advanced-whisper preview style from the reference bot.
     card = (
-        f"🔐 <b>A whisper message to @{html.escape(target_username)}</b>\n"
-        "Only they can open this whisper."
+        f"🔐 <b>An advanced whisper message to @{html.escape(target_username)}</b>\n"
+        "Only they can read this advanced whisper."
     )
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("🔓 Open Whisper", callback_data=f"ws:inline:{token}")
     ]])
     result = InlineQueryResultArticle(
         id=token,
-        title=f"🔐 Whisper to @{target_username}",
-        description="Only the selected user can open this whisper.",
+        title=f"🤫 Advanced whisper to @{target_username}",
+        description="Only they can read this advanced whisper.",
         input_message_content=InputTextMessageContent(
             card, parse_mode="HTML"
         ),
@@ -873,6 +874,10 @@ async def whisper_callback(update, context):
     doc = await mongo.whispers.find_one({"whisper_id": wid})
     if not doc:
         await q.answer("Whisper no longer exists.", show_alert=True); return
+    # The shared deep-link card uses a distinct callback. Anyone holding that
+    # intentionally shared link can open the whisper, without making the
+    # original group/DM Open Whisper button public to everyone.
+    shared_open = parts[1] == "sharedopen"
     if parts[1] == "block":
         if uid not in (doc["sender_id"], doc["recipient_id"]):
             await q.answer("Only conversation participants can block.", show_alert=True); return
@@ -880,11 +885,13 @@ async def whisper_callback(update, context):
         other = doc["sender_id"] if uid == doc["recipient_id"] else doc["recipient_id"]
         await users.update_one({"chat_id": doc["chat_id"], "user_id": uid}, {"$addToSet": {"blocked_users": other}}, upsert=True)
         await q.answer("User blocked.", show_alert=True); return
-    if uid not in (doc["sender_id"], doc["recipient_id"]):
-        await q.answer("🚫 Access denied.", show_alert=True); return
-    if parts[1] == "open":
-        # Record a visible read receipt only when the intended recipient opens it.
-        await _mark_whisper_read(doc, q)
+    if not shared_open and uid not in (doc["sender_id"], doc["recipient_id"]):
+        await q.answer("🚫 Access denied. Open the whisper using its shared link.", show_alert=True); return
+    if parts[1] in ("open", "sharedopen"):
+        # Only the intended recipient marks the whisper as read; opening a shared
+        # link grants access but does not falsely mark the recipient's read receipt.
+        if not shared_open:
+            await _mark_whisper_read(doc, q)
         # Text can be shown in a native alert. Media cannot, so deliver the
         # stored Telegram file privately to the participant who pressed Open.
         messages = doc.get("messages", [])
