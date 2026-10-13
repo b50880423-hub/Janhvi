@@ -15,6 +15,9 @@ from utils.permissions import is_admin
 
 log = logging.getLogger(__name__)
 
+# One cancellable bulk-tag run per chat.
+TAG_STOP_EVENTS = {}
+
 
 def _mention(user_id, name):
     return f'<a href="tg://user?id={int(user_id)}">{html.escape(name or "Member")}</a>'
@@ -41,30 +44,35 @@ async def _admin_only(update, context):
 
 
 async def _send_tag_list(update, context, title, users):
+    """Send mentions in batches of five, waiting three seconds between messages."""
     msg = update.effective_message
     chat_id = update.effective_chat.id
     heading = _heading(msg, context)
-    # One mention per line, split safely under Telegram's message size limit.
-    prefix = f"{heading}\n\n{title}\n"
-    chunks, current = [], prefix
-    count = 0
-    for uid, name in users:
-        line = f"• {_mention(uid, name)}\n"
-        if len(current) + len(line) > 3500:
-            chunks.append(current.rstrip())
-            current = f"{title} (continued)\n"
-        current += line
-        count += 1
-    if current.strip():
-        chunks.append(current.rstrip())
-    if not count:
+    if not users:
         await msg.reply_text("ℹ️ No eligible members were found.")
         return
-    status = await msg.reply_text(f"⏳ Preparing tags for {count} people…")
-    for i, chunk in enumerate(chunks):
+
+    # Five members per message keeps each batch readable and makes the
+    # requested three-second gap apply between each batch.
+    batches = [users[i:i + 5] for i in range(0, len(users), 5)]
+    stop_event = asyncio.Event()
+    TAG_STOP_EVENTS[chat_id] = stop_event
+    status = await msg.reply_text(
+        f"⏳ Starting tags for {len(users)} people in batches of 5 "
+        f"({len(batches)} message(s), 3-second gap)…"
+    )
+
+    sent_count = 0
+    for index, batch in enumerate(batches):
+        if stop_event.is_set():
+            break
+        lines = [f"• {_mention(uid, name)}" for uid, name in batch]
+        chunk = f"{heading}\\n\\n{title} ({index + 1}/{len(batches)})\\n" + "\\n".join(lines)
         try:
             await context.bot.send_message(
-                chat_id=chat_id, text=chunk, parse_mode="HTML",
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode="HTML",
                 disable_web_page_preview=True,
                 reply_to_message_id=msg.reply_to_message.message_id if msg.reply_to_message else None,
                 allow_sending_without_reply=True,
@@ -72,19 +80,58 @@ async def _send_tag_list(update, context, title, users):
         except RetryAfter as exc:
             await asyncio.sleep(float(exc.retry_after) + 0.5)
             try:
-                await context.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML", disable_web_page_preview=True)
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode="HTML",
+                    disable_web_page_preview=True,
+                    reply_to_message_id=msg.reply_to_message.message_id if msg.reply_to_message else None,
+                    allow_sending_without_reply=True,
+                )
             except TelegramError:
-                log.exception("Failed to send tag chunk in %s", chat_id)
+                log.exception("Failed to send tag batch in %s", chat_id)
+                await status.edit_text(f"⚠️ Tagging stopped at batch {index + 1}/{len(batches)}.")
+                return
         except TelegramError:
-            log.exception("Failed to send tag chunk in %s", chat_id)
-            await status.edit_text("⚠️ Telegram rejected a tag message. Try again later or use a smaller group.")
+            log.exception("Failed to send tag batch in %s", chat_id)
+            await status.edit_text(f"⚠️ Tagging stopped at batch {index + 1}/{len(batches)}.")
             return
-        if i < len(chunks) - 1:
-            await asyncio.sleep(1.1)
+
+        sent_count += len(batch)
+        if index < len(batches) - 1:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                pass
+
+    was_stopped = stop_event.is_set()
+    if TAG_STOP_EVENTS.get(chat_id) is stop_event:
+        TAG_STOP_EVENTS.pop(chat_id, None)
     try:
-        await status.edit_text(f"✅ Tagged {count} {'admins' if title.startswith('👑') else 'known members'} in {len(chunks)} message(s).")
+        if was_stopped:
+            await status.edit_text(
+                f"⏹ Tagging stopped. Sent {sent_count} of {len(users)} member mentions."
+            )
+        else:
+            await status.edit_text(
+                f"✅ Tagged {sent_count} {'admins' if title.startswith('👑') else 'known members'} "
+                f"in batches of 5 with a 3-second gap."
+            )
     except TelegramError:
         pass
+
+
+async def stop_tagging(update, context):
+    """Stop the active bulk-tagging run in this group."""
+    if not await _admin_only(update, context):
+        return
+    chat_id = update.effective_chat.id
+    event = TAG_STOP_EVENTS.get(chat_id)
+    if event is None:
+        await update.effective_message.reply_text("ℹ️ No tagging run is active in this group.")
+        return
+    event.set()
+    await update.effective_message.reply_text("⏹ Stop requested. Tagging will halt before the next batch.")
 
 
 async def atag(update, context):
