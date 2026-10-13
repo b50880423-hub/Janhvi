@@ -175,8 +175,13 @@ async def utag(update, context):
             if user.is_bot:
                 continue
             result.append((user.id, user.full_name))
-        except TelegramError:
-            # Unknown/inaccessible records are skipped rather than guessed.
+        except TelegramError as exc:
+            # Telegram may return 400 for stale/invalid user or chat IDs.
+            # Skip inaccessible records so one bad record doesn't abort /utag.
+            log.info(
+                "Skipping member lookup in chat %s for user %s: %s",
+                chat_id, uid, exc
+            )
             continue
     result.sort(key=lambda item: item[1].casefold())
     await _send_tag_list(update, context, "👥 <b>GROUP MEMBERS</b>", result)
