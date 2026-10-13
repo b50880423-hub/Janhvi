@@ -176,12 +176,20 @@ async def utag(update, context):
                 continue
             result.append((user.id, user.full_name))
         except TelegramError as exc:
-            # Telegram may return 400 for stale/invalid user or chat IDs.
-            # Skip inaccessible records so one bad record doesn't abort /utag.
+            # Telegram's "Member not found" indicates a stale/inaccessible
+            # record for this group. Skip it and remove the stale DB entry so
+            # /utag does not keep querying the same ID on every run.
+            reason = str(exc)
             log.info(
                 "Skipping member lookup in chat %s for user %s: %s",
-                chat_id, uid, exc
+                chat_id, uid, reason
             )
+            if "member not found" in reason.lower() or "user not found" in reason.lower():
+                try:
+                    await collection.delete_one({"chat_id": chat_id, "user_id": uid})
+                    log.info("Removed stale member record for user %s in chat %s", uid, chat_id)
+                except Exception:
+                    log.exception("Could not remove stale member record for user %s in chat %s", uid, chat_id)
             continue
     result.sort(key=lambda item: item[1].casefold())
     await _send_tag_list(update, context, "👥 <b>GROUP MEMBERS</b>", result)
