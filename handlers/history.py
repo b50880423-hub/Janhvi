@@ -5,7 +5,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 from database import mongo
 from config import HISTORY_SOURCE_BOT
-from history_client import fetch_history, resolve_target_id, client as history_client
+from history_client import fetch_history, resolve_target_id, status as history_status
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,13 @@ def _chunks(text, limit=3900):
         yield text[:cut]
         text = text[cut:].lstrip()
     if text: yield text
+
+async def history_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
+    if not message:
+        return
+    await message.reply_text("🔎 SangMata status\n\n" + history_status())
+
 
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
@@ -134,8 +141,8 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 sections.append("\n🌐 The external history source returned no text records.")
         except Exception as exc:
-            logger.info("External history fetch unavailable for %s: %s", target_id, type(exc).__name__)
-            sections.append(f"\n🌐 Past history source unavailable right now ({type(exc).__name__}). Local tracking will continue.")
+            logger.exception("External history fetch unavailable for %s", target_id)
+            sections.append(f"\n🌐 SangMata unavailable: {exc}\nLocal tracking will continue.")
 
     combined = "\n".join(sections)
     for part in _chunks(combined):
